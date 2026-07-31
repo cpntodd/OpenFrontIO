@@ -251,6 +251,7 @@ export interface JoinLobbyEvent {
 // one widget is ever active.
 
 const TOKEN_TTL_MS = 3 * 60 * 1000;
+const TOKEN_GENERATION_TIMEOUT_MS = 15 * 1000;
 
 class TurnstileTokenManager {
   private currentToken: { token: string; createdAt: number } | null = null;
@@ -331,13 +332,19 @@ class TurnstileTokenManager {
       execution: "execute",
     });
     return new Promise((resolve, reject) => {
+      const timeout = window.setTimeout(() => {
+        window.turnstile.remove(widgetId);
+        reject(new Error("Turnstile token generation timed out"));
+      }, TOKEN_GENERATION_TIMEOUT_MS);
       window.turnstile.execute(widgetId, {
         callback: (token: string) => {
+          window.clearTimeout(timeout);
           window.turnstile.remove(widgetId);
           console.log("[Turnstile] Token received");
           resolve({ token, createdAt: Date.now() });
         },
         "error-callback": (errorCode: string) => {
+          window.clearTimeout(timeout);
           window.turnstile.remove(widgetId);
           console.error(`[Turnstile] Error: ${errorCode}`);
           reject(new Error(`Turnstile failed: ${errorCode}`));

@@ -2,8 +2,7 @@
 
 This is a go-based tool to generate map files for OpenFront.
 
-The map generator reads PNG files and converts pixels into terrain based primarily on the **Blue** channel.
-Because only blue values are used, grayscale and other formats are fully supported. Many maps in `assets/maps/<mapname>` are grayscale.
+The map generator reads common image formats and converts them into terrain. Desktop custom maps use image luminance as elevation, then apply water level, mountain threshold, brightness, contrast, inversion, and cleanup settings. Existing bundled maps can continue to use their authored blue-channel height maps.
 
 Additional Guides, Tutorials, Scripts, Resources, and Third Party Unofficial Applications can be found on
 the [Official Openfront Wiki](https://openfront.wiki/Map_Making)
@@ -60,10 +59,19 @@ Alternatively, `npm run gen-maps` (from the root directory) runs the generator f
 The desktop map generator also supports one-off custom maps:
 
 - `--map-name`: Name for the generated map.
-- `--input`: Source PNG path (mutually exclusive with `--seed`).
+- `--input`: Source PNG, JPEG, WebP, or GIF path (mutually exclusive with `--seed`).
 - `--seed`: A deterministic seed containing 1–128 printable ASCII characters (mutually exclusive with `--input`).
 - `--output`: Output directory for the generated map files.
-- `--width` / `--height`: Seed map dimensions; both default to 512.
+- `--width` / `--height`: Seed map dimensions; both default to 512 and may be
+  increased up to 8000×8000.
+- `--water-level` / `--mountain-threshold`: Elevation cutoffs used when
+  converting a source image or seed into terrain.
+- `--brightness` / `--contrast`: Source-image adjustment controls.
+- `--invert`: Invert source elevation before conversion.
+- `--remove-small`, `--min-island-size`, `--min-lake-size`: Terrain cleanup
+  controls.
+- `--preview` / `--preview-output`: Write a colorized PNG preview without
+  creating a map bundle.
 
 ### Logging
 

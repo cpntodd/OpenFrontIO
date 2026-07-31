@@ -10,8 +10,7 @@ directories:
 # ── Files to include in the app package ───────────
 files:
   - static/**/*
-  - electron/**/*.js
-  - electron/**/*.mjs
+  - electron-dist/**/*
   - package.json
   - node_modules/**/*
 
@@ -30,13 +29,18 @@ linux:
     - target: deb
       arch:
         - x64
+    - target: appimage
+      arch:
+        - x64
   category: Game
-  icon: build/icon.png
+  icon: build/icon-512.png
   desktop:
-    Name: OpenFront
-    Comment: Real-time multiplayer territorial strategy game
-    Categories: Game;Strategy;
-    StartupWMClass: OpenFront
+    entry:
+      Name: OpenFront
+      Comment: Real-time multiplayer territorial strategy game
+      Categories: Game;Strategy;
+      StartupWMClass: OpenFront
+  syncDesktopName: true
   synopsis: Real-time multiplayer territorial strategy game
   description: >
     OpenFront is an online real-time strategy game focused on
@@ -44,6 +48,10 @@ linux:
     to expand their territory, build structures, and form
     strategic alliances in various maps based on real-world geography.
   maintainer: cpntodd
+
+# Debian package options (electron-builder 26: format-specific options
+# live in a top-level key per target, not inside linux.target)
+deb:
   depends:
     - libwebkit2gtk-4.1-0
     - libgtk-3-0

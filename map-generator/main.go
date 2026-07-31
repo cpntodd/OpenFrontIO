@@ -59,6 +59,16 @@ var outputFlag string
 var seedFlag string
 var widthFlag int
 var heightFlag int
+var waterLevelFlag int
+var mountainThresholdFlag int
+var brightnessFlag int
+var contrastFlag int
+var invertFlag bool
+var removeSmallFlag bool
+var minIslandSizeFlag int
+var minLakeSizeFlag int
+var previewFlag bool
+var previewOutputFlag string
 
 // workersFlag controls how many maps are processed concurrently, bounding peak memory usage.
 var workersFlag int
@@ -204,14 +214,8 @@ func runCustomGeneration(ctx context.Context) error {
 		}
 	}
 
-	result, err := GenerateMap(ctx, GeneratorArgs{
-		Name:        mapNameFlag,
-		ImageBuffer: imageBuffer,
-		Seed:        seedFlag,
-		Width:       widthFlag,
-		Height:      heightFlag,
-		RemoveSmall: true,
-	})
+	args := customGeneratorArgs(imageBuffer)
+	result, err := GenerateMap(ctx, args)
 	if err != nil {
 		return fmt.Errorf("failed to generate custom map: %w", err)
 	}
@@ -239,6 +243,57 @@ func runCustomGeneration(ctx context.Context) error {
 		},
 	}
 	return writeGeneratedMap(outputFlag, result, manifest)
+}
+
+func runCustomPreview(ctx context.Context) error {
+	if previewOutputFlag == "" {
+		return fmt.Errorf("--preview-output is required for preview generation")
+	}
+	if inputFlag == "" && seedFlag == "" {
+		return fmt.Errorf("either --input or --seed is required for preview generation")
+	}
+	if inputFlag != "" && seedFlag != "" {
+		return fmt.Errorf("--input and --seed cannot be used together")
+	}
+
+	var imageBuffer []byte
+	if inputFlag != "" {
+		var err error
+		imageBuffer, err = os.ReadFile(inputFlag)
+		if err != nil {
+			return fmt.Errorf("failed to read input image %s: %w", inputFlag, err)
+		}
+	}
+	preview, width, height, err := GeneratePreview(customGeneratorArgs(imageBuffer))
+	if err != nil {
+		return fmt.Errorf("failed to generate preview: %w", err)
+	}
+	if err := os.WriteFile(previewOutputFlag, preview, 0644); err != nil {
+		return fmt.Errorf("failed to write preview: %w", err)
+	}
+	fmt.Printf("Preview dimensions: %dx%d\n", width, height)
+	return nil
+}
+
+func customGeneratorArgs(imageBuffer []byte) GeneratorArgs {
+	return GeneratorArgs{
+		Name:                 mapNameFlag,
+		ImageBuffer:          imageBuffer,
+		Seed:                 seedFlag,
+		Width:                widthFlag,
+		Height:               heightFlag,
+		ConvertImage:         inputFlag != "",
+		WaterLevel:           waterLevelFlag,
+		WaterLevelSet:        true,
+		MountainThreshold:    mountainThresholdFlag,
+		MountainThresholdSet: true,
+		Brightness:           brightnessFlag,
+		Contrast:             contrastFlag,
+		Invert:               invertFlag,
+		RemoveSmall:          removeSmallFlag,
+		MinIslandSize:        minIslandSizeFlag,
+		MinLakeSize:          minLakeSizeFlag,
+	}
 }
 
 // parseMapsFlag validates and parses the --maps command-line argument.
@@ -321,8 +376,18 @@ func main() {
 	flag.StringVar(&inputFlag, "input", "", "custom map source PNG")
 	flag.StringVar(&outputFlag, "output", "", "custom map output directory")
 	flag.StringVar(&seedFlag, "seed", "", "custom map printable seed")
-	flag.IntVar(&widthFlag, "width", 0, "custom seed map width (default 512)")
-	flag.IntVar(&heightFlag, "height", 0, "custom seed map height (default 512)")
+	flag.IntVar(&widthFlag, "width", 0, "custom seed map width (default 512, maximum 8000)")
+	flag.IntVar(&heightFlag, "height", 0, "custom seed map height (default 512, maximum 8000)")
+	flag.IntVar(&waterLevelFlag, "water-level", defaultWaterLevel, "source value at or below which terrain becomes water")
+	flag.IntVar(&mountainThresholdFlag, "mountain-threshold", defaultMountainThreshold, "source value at or above which terrain becomes mountains")
+	flag.IntVar(&brightnessFlag, "brightness", 0, "source brightness adjustment from -100 to 100")
+	flag.IntVar(&contrastFlag, "contrast", 100, "source contrast percentage from 25 to 300")
+	flag.BoolVar(&invertFlag, "invert", false, "invert source elevation")
+	flag.BoolVar(&removeSmallFlag, "remove-small", true, "remove small islands and lakes")
+	flag.IntVar(&minIslandSizeFlag, "min-island-size", defaultMinIslandSize, "minimum land body size to keep")
+	flag.IntVar(&minLakeSizeFlag, "min-lake-size", defaultMinLakeSize, "minimum lake size to keep")
+	flag.BoolVar(&previewFlag, "preview", false, "write a colorized preview instead of a map bundle")
+	flag.StringVar(&previewOutputFlag, "preview-output", "", "preview PNG output path")
 	flag.IntVar(&workersFlag, "workers", 4, "number of maps to process concurrently. reduce to lower peak memory usage.")
 	flag.StringVar(&logFlags.logLevel, "log-level", "", "Explicitly sets the log level to one of: ALL, DEBUG, INFO (default), WARN, ERROR.")
 	flag.BoolVar(&logFlags.verbose, "verbose", false, "Adds additional logging and prefixes logs with the [mapname].  Alias of log-level=DEBUG.")
@@ -340,6 +405,14 @@ func main() {
 	))
 
 	slog.SetDefault(logger)
+
+	if previewFlag {
+		if err := runCustomPreview(context.Background()); err != nil {
+			log.Fatalf("Error generating custom map preview: %v", err)
+		}
+		fmt.Println("Custom map preview generated successfully")
+		return
+	}
 
 	if mapNameFlag != "" || inputFlag != "" || outputFlag != "" || seedFlag != "" {
 		if err := runCustomGeneration(context.Background()); err != nil {

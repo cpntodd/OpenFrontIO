@@ -50,6 +50,8 @@ export interface ElectronAPI {
   // ── Map generator ──
   mapGen: {
     generate(options: MapGenOptions): Promise<MapGenResult>;
+    preview(options: MapGenOptions): Promise<MapGenPreviewResult>;
+    exportMap(folder: string): Promise<MapGenExportResult>;
     list(): Promise<CustomMapList>;
     pickImage(): Promise<string | null>;
   };
@@ -106,14 +108,35 @@ export interface LanGame {
 export interface MapGenOptions {
   inputImage?: string;
   seed?: string;
-  outputName: string;
+  outputName?: string;
   width?: number;
   height?: number;
   waterLevel?: number;
   mountainThreshold?: number;
+  brightness?: number;
+  contrast?: number;
+  invert?: boolean;
+  removeSmall?: boolean;
+  minIslandSize?: number;
+  minLakeSize?: number;
 }
 
 export interface MapGenResult {
+  success: boolean;
+  outputPath?: string;
+  outputFolder?: string;
+  error?: string;
+}
+
+export interface MapGenPreviewResult {
+  success: boolean;
+  dataUrl?: string;
+  width?: number;
+  height?: number;
+  error?: string;
+}
+
+export interface MapGenExportResult {
   success: boolean;
   outputPath?: string;
   error?: string;
@@ -156,6 +179,8 @@ const electronAPI: ElectronAPI = {
 
   mapGen: {
     generate: (options) => ipcRenderer.invoke("mapgen:generate", options),
+    preview: (options) => ipcRenderer.invoke("mapgen:preview", options),
+    exportMap: (folder) => ipcRenderer.invoke("mapgen:export", folder),
     list: () => ipcRenderer.invoke("mapgen:list"),
     pickImage: () => ipcRenderer.invoke("mapgen:pick-image"),
   },

@@ -74,6 +74,10 @@ export class ClientEnv {
       ? "http://localhost:8787"
       : `https://api.${audience}`;
   }
+  /** WebSocket origin for API services such as ranked matchmaking. */
+  static matchmakingWsBase(): string {
+    return toWebSocketOrigin(ClientEnv.jwtIssuer());
+  }
   static async jwkPublicKey(): Promise<JWK> {
     if (ClientEnv.publicKey) return ClientEnv.publicKey;
     const jwksUrl = ClientEnv.jwtIssuer() + "/.well-known/jwks.json";
@@ -104,6 +108,17 @@ export class ClientEnv {
   static workerPath(gameID: GameID): string {
     return `w${ClientEnv.workerIndex(gameID)}`;
   }
+}
+
+/** Convert an HTTP(S) origin to the corresponding WS(S) origin. */
+export function toWebSocketOrigin(origin: string): string {
+  const url = new URL(origin);
+  if (url.protocol === "http:") url.protocol = "ws:";
+  if (url.protocol === "https:") url.protocol = "wss:";
+  if (url.protocol !== "ws:" && url.protocol !== "wss:") {
+    throw new Error(`Unsupported WebSocket origin protocol: ${url.protocol}`);
+  }
+  return url.origin;
 }
 /**
  * Values that flow from server → client via index.html. Set on the server from

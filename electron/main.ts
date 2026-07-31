@@ -29,6 +29,37 @@ let localServer: http.Server | null = null;
 let localServerPort: number | null = null;
 let oauthCallbackToken: string | null = null;
 
+// Keep the renderer's origin stable between launches. Username, TAG, settings,
+// and other client state are stored in localStorage, which is keyed by origin;
+// an ephemeral port would silently create a fresh store every time the app
+// starts. This port is separate from the embedded LAN server's default 9000.
+const ELECTRON_LOCAL_SERVER_PORT = 47837;
+
+// This is a public Turnstile site key, not a secret. The packaged desktop
+// client must use the same production key as the online game; the test key is
+// only useful for local development. Allow deployments and local packaging to
+// provide it without putting an environment-specific key in source control.
+function getDesktopTurnstileSiteKey(): string {
+  try {
+    const configPath = path.join(__dirname, "desktop-config.json");
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8")) as {
+      turnstileSiteKey?: unknown;
+    };
+    if (typeof config.turnstileSiteKey === "string" && config.turnstileSiteKey) {
+      return config.turnstileSiteKey;
+    }
+  } catch {
+    // Development builds may not have a generated desktop config yet.
+  }
+  return (
+    process.env.OPENFRONT_TURNSTILE_SITE_KEY ??
+    process.env.TURNSTILE_SITE_KEY ??
+    "1x00000000000000000000AA"
+  );
+}
+
+const DESKTOP_TURNSTILE_SITE_KEY = getDesktopTurnstileSiteKey();
+
 // ── Environment ────────────────────────────────────────────
 
 function isDev(): boolean {
@@ -126,7 +157,7 @@ function startLocalServer(): Promise<number> {
     const proprietaryDir = path.join(rootDir, "proprietary");
     const customMapsDir = path.join(app.getPath("userData"), "maps");
     const appVersion = app.getVersion() || "desktop";
-    let serverPort = 0;
+    let serverPort = ELECTRON_LOCAL_SERVER_PORT;
 
     // Directories to search for static assets, in priority order:
     // 1. static/ (Vite build output: JS, CSS, bundled assets)
@@ -152,7 +183,7 @@ function startLocalServer(): Promise<number> {
       cdnBaseRaw: "",
       gameEnv: JSON.stringify("prod"),
       numWorkers: JSON.stringify(1),
-      turnstileSiteKey: JSON.stringify("1x00000000000000000000AA"),
+      turnstileSiteKey: JSON.stringify(DESKTOP_TURNSTILE_SITE_KEY),
       jwtAudience: JSON.stringify("openfront.io"),
       instanceId: JSON.stringify("desktop"),
       serverHost: JSON.stringify("openfront.io"),
@@ -329,7 +360,7 @@ function startLocalServer(): Promise<number> {
       res.end("Not Found");
     });
 
-    localServer.listen(0, "127.0.0.1", () => {
+    localServer.listen(ELECTRON_LOCAL_SERVER_PORT, "127.0.0.1", () => {
       const addr = localServer?.address();
       if (addr && typeof addr === "object") {
         serverPort = addr.port;
@@ -385,6 +416,8 @@ function registerIpcHandlers(): void {
   ipcMain.handle("lan:connect", async (_e, host: string, port: number) => ({ host, port }));
 
   ipcMain.handle("mapgen:generate", async (_e, opts: any) => mapGenSidecar.generate(opts));
+  ipcMain.handle("mapgen:preview", async (_e, opts: any) => mapGenSidecar.preview(opts));
+  ipcMain.handle("mapgen:export", async (_e, folder: string) => mapGenSidecar.exportMap(folder));
   ipcMain.handle("mapgen:list", async () => ({
     maps: await mapGenSidecar.list(),
     assetBaseUrl:

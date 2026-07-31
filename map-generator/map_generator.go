@@ -1,13 +1,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"hash/fnv"
 	"image"
 	"image/color"
-	"image/png"
 	"math"
 
 	"github.com/chai2010/webp"
@@ -15,13 +13,18 @@ import (
 
 const (
 	// The smallest a body of land or lake can be, all smaller are removed
-	minIslandSize = 30
-	minLakeSize   = 200
+	defaultMinIslandSize = 30
+	defaultMinLakeSize   = 200
 	// the recommended max area pixel size for input images
 	minRecommendedPixelSize = 2000000
 	maxRecommendedPixelSize = 3000000
 	// the recommended max number of land tiles in the output bin at full size
 	maxRecommendedLandTileCount = 3000000
+	// Seed maps are intentionally capped below the largest bundled source map
+	// so a single generation cannot exhaust the desktop application's memory.
+	maxSeedMapDimension      = 8000
+	defaultWaterLevel        = 127
+	defaultMountainThreshold = 200
 )
 
 // Holds raw RGBA image data for the thumbnail
@@ -43,6 +46,7 @@ type TerrainType uint8
 const (
 	Land TerrainType = iota
 	Water
+	Impassable
 )
 
 // Terrain represents the properties of a single map tile.
@@ -75,12 +79,22 @@ type MapInfo struct {
 
 // GeneratorArgs defines the input parameters for the map generation process.
 type GeneratorArgs struct {
-	Name        string
-	ImageBuffer []byte
-	Seed        string
-	Width       int
-	Height      int
-	RemoveSmall bool
+	Name                 string
+	ImageBuffer          []byte
+	Seed                 string
+	Width                int
+	Height               int
+	ConvertImage         bool
+	WaterLevel           int
+	WaterLevelSet        bool
+	MountainThreshold    int
+	MountainThresholdSet bool
+	Brightness           int
+	Contrast             int
+	Invert               bool
+	RemoveSmall          bool
+	MinIslandSize        int
+	MinLakeSize          int
 }
 
 // GenerateMap is the main map-generator workflow.
@@ -94,38 +108,47 @@ type GeneratorArgs struct {
 // For Water tiles, "Magnitude" is calculated during generation as the distance to the nearest land.
 //
 // Pixel -> Terrain & Magnitude mapping
-// | Input Condition    | Terrain Type    | Magnitude          | Notes                            |
-// | :----------------- | :-------------- | :----------------- | :------------------------------- |
-// | **Alpha < 20**     | Water           | Distance to Land\* | Transparent pixels become water. |
-// | **Blue = 106**     | Water           | Distance to Land\* | Specific key color for water.    |
-// | **Blue < 140**     | Land (Plains)   | 0                  | Clamped to minimum magnitude.    |
-// | **Blue 140 - 158** | Land (Plains)   | 0 - 9              | 					 					 					 		|
-// | **Blue 159 - 178** | Land (Highland) | 10 - 19            | 					 					 					 		|
-// | **Blue 179 - 200** | Land (Mountain) | 20 - 30            | 				 					 					 			|
-// | **Blue > 200**     | Land (Mountain) | 30                 | Clamped to maximum magnitude.    |
+// | Input Condition    | Terrain Type     | Magnitude          | Notes                            |
+// | :----------------- | :--------------- | :----------------- | :------------------------------- |
+// | **Alpha < 20**     | Water            | Distance to Land\* | Transparent pixels become water. |
+// | **Blue = 106**     | Water            | Distance to Land\* | Specific key color for water.    |
+// | **#000 (black)**   | Impassable       | 31 (fixed)         | Solid void; cannot be owned/attacked/nuked. |
+// | **Blue < 140**     | Land (Plains)    | 0                  | Clamped to minimum magnitude.    |
+// | **Blue 140 - 158** | Land (Plains)    | 0 - 9              | 					 					 					 		|
+// | **Blue 159 - 178** | Land (Highland)  | 10 - 19            | 					 					 					 		|
+// | **Blue 179 - 200** | Land (Mountain)  | 20 - 30            | 				 					 					 			|
+// | **Blue > 200**     | Land (Mountain)  | 30                 | Clamped to maximum magnitude.    |
+//
+// Impassable terrain is encoded in the binary format as isLand=1 + magnitude=31.
+// It renders as the map background colour (making the map appear non-rectangular)
+// and cannot be owned, attacked, or nuked. Nuke trajectories cannot cross it.
 //
 // Misc Notes
 //   - It normalizes map width/height to multiples of 4 for the mini map downscaling.
 func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 	logger := LoggerFromContext(ctx)
-	var img image.Image
-	var err error
-	if len(args.ImageBuffer) > 0 {
-		img, err = png.Decode(bytes.NewReader(args.ImageBuffer))
-		if err != nil {
-			return MapResult{}, fmt.Errorf("failed to decode PNG: %w", err)
-		}
-	} else if args.Seed != "" {
-		img, err = generateSeedImage(args.Seed, args.Width, args.Height)
-		if err != nil {
-			return MapResult{}, err
-		}
-	} else {
-		return MapResult{}, fmt.Errorf("either an input image or a seed is required")
+	img, err := prepareInputImage(args)
+	if err != nil {
+		return MapResult{}, err
+	}
+	if _, _, _, _, _, err := conversionSettings(args); err != nil {
+		return MapResult{}, err
+	}
+
+	islandThreshold := args.MinIslandSize
+	if islandThreshold <= 0 {
+		islandThreshold = defaultMinIslandSize
+	}
+	lakeThreshold := args.MinLakeSize
+	if lakeThreshold <= 0 {
+		lakeThreshold = defaultMinLakeSize
 	}
 
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
+	if width < 4 || height < 4 {
+		return MapResult{}, fmt.Errorf("source image must be at least 4x4 pixels")
+	}
 
 	// Ensure width and height are multiples of 4 for the mini map downscaling
 	width = width - (width % 4)
@@ -147,14 +170,19 @@ func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 	// Process each pixel
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
-			_, _, b, a := img.At(x, y).RGBA()
+			r, g, b, a := img.At(x, y).RGBA()
 			// Convert from 16-bit to 8-bit values
-			alpha := uint8(a >> 8)
+			red := uint8(r >> 8)
+			green := uint8(g >> 8)
 			blue := uint8(b >> 8)
+			alpha := uint8(a >> 8)
 
 			if alpha < 20 || blue == 106 {
 				// Transparent or specific blue value = water
 				terrain[x][y] = Terrain{Type: Water}
+			} else if red == 0 && green == 0 && blue == 0 {
+				// Pure black (#000) = impassable terrain
+				terrain[x][y] = Terrain{Type: Impassable}
 			} else {
 				// Land
 				terrain[x][y] = Terrain{Type: Land}
@@ -169,15 +197,21 @@ func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 	img = nil
 	args.ImageBuffer = nil
 
-	removeSmallIslands(ctx, terrain, minIslandSize, args.RemoveSmall)
-	processWater(ctx, terrain, args.RemoveSmall)
+	removeSmallIslands(ctx, terrain, islandThreshold, args.RemoveSmall)
+	processWater(ctx, terrain, args.RemoveSmall, lakeThreshold)
+	// Water adjacent to impassable terrain should be deep (no depth gradient),
+	// just like water at the map edge.  Override the BFS-calculated magnitude
+	// so these tiles render as the deepest shade.
+	setImpassableNeighborWaterDepth(ctx, terrain)
 
 	terrain4x := createMiniMap(terrain)
-	removeSmallIslands(ctx, terrain4x, minIslandSize/2, args.RemoveSmall)
-	processWater(ctx, terrain4x, false)
+	removeSmallIslands(ctx, terrain4x, islandThreshold/2, args.RemoveSmall)
+	processWater(ctx, terrain4x, false, lakeThreshold/4)
+	setImpassableNeighborWaterDepth(ctx, terrain4x)
 
 	terrain16x := createMiniMap(terrain4x)
-	processWater(ctx, terrain16x, false)
+	processWater(ctx, terrain16x, false, lakeThreshold/16)
+	setImpassableNeighborWaterDepth(ctx, terrain16x)
 
 	thumb := createMapThumbnail(ctx, terrain4x, 0.5)
 	webp, err := convertToWebP(ThumbData{
@@ -234,7 +268,7 @@ func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 // It uses several layers of interpolated value noise so nearby pixels form
 // coastlines and terrain rather than independent random dots. The resulting
 // image is fed through the same GenerateMap pipeline as a user-supplied PNG.
-func generateSeedImage(seed string, requestedWidth, requestedHeight int) (image.Image, error) {
+func generateSeedImage(seed string, requestedWidth, requestedHeight int, optionArgs ...GeneratorArgs) (image.Image, error) {
 	if len(seed) == 0 || len(seed) > 128 {
 		return nil, fmt.Errorf("seeds must contain between 1 and 128 printable ASCII characters")
 	}
@@ -255,8 +289,16 @@ func generateSeedImage(seed string, requestedWidth, requestedHeight int) (image.
 	if width < 32 || height < 32 {
 		return nil, fmt.Errorf("seed maps must be at least 32x32 pixels")
 	}
-	if width > 4096 || height > 4096 {
-		return nil, fmt.Errorf("seed maps cannot exceed 4096x4096 pixels")
+	if width > maxSeedMapDimension || height > maxSeedMapDimension {
+		return nil, fmt.Errorf("seed maps cannot exceed %dx%d pixels", maxSeedMapDimension, maxSeedMapDimension)
+	}
+	args := GeneratorArgs{}
+	if len(optionArgs) > 0 {
+		args = optionArgs[0]
+	}
+	waterLevel, mountainThreshold, _, _, _, err := conversionSettings(args)
+	if err != nil {
+		return nil, err
 	}
 
 	hasher := fnv.New64a()
@@ -279,18 +321,8 @@ func generateSeedImage(seed string, requestedWidth, requestedHeight int) (image.
 			noise += (0.62 - distance) * 0.12
 			noise = math.Max(0, math.Min(1, noise))
 
-			if noise < 0.42 {
-				// Blue 106 is the canonical water key colour understood by
-				// GenerateMap. Keep alpha opaque so the seed path remains
-				// equivalent to an ordinary PNG source image.
-				img.SetRGBA(x, y, color.RGBA{B: 106, A: 255})
-				continue
-			}
-
-			blue := uint8(140 + math.Round((noise-0.42)/0.58*90))
-			if blue > 230 {
-				blue = 230
-			}
+			value := int(math.Round(noise * 255))
+			blue := elevationToBlue(value, waterLevel, mountainThreshold)
 			img.SetRGBA(x, y, color.RGBA{R: blue, G: blue, B: blue, A: 255})
 		}
 	}
@@ -351,8 +383,9 @@ func convertToWebP(thumb ThumbData) ([]byte, error) {
 
 // createMiniMap downscales the terrain grid by half.
 // It maps 2x2 blocks of input tiles to a single output tile.
-// The logic prioritizes Water: if any of the 4 source tiles is Water,
-// the resulting mini-map tile becomes Water.
+// Priority: Water > Impassable > Land. Water always wins so that narrow
+// rivers inside or bordering impassable terrain are preserved on the minimap
+// (the pathfinder runs on the minimap and needs accurate water bodies).
 func createMiniMap(tm [][]Terrain) [][]Terrain {
 	width := len(tm)
 	height := len(tm[0])
@@ -370,12 +403,29 @@ func createMiniMap(tm [][]Terrain) [][]Terrain {
 			miniX := x / 2
 			miniY := y / 2
 
-			if miniX < miniWidth && miniY < miniHeight {
-				// If any of the 4 tiles has water, mini tile is water
-				if miniMap[miniX][miniY].Type != Water {
-					miniMap[miniX][miniY] = tm[x][y]
-				}
+			if miniX >= miniWidth || miniY >= miniHeight {
+				continue
 			}
+			src := tm[x][y]
+			dst := &miniMap[miniX][miniY]
+			// Water wins over everything — narrow rivers must be preserved
+			// for pathfinding accuracy.
+			if dst.Type == Water {
+				continue
+			}
+			if src.Type == Water {
+				*dst = src
+				continue
+			}
+			// Impassable wins over land; once set, keep it.
+			if dst.Type == Impassable {
+				continue
+			}
+			if src.Type == Impassable {
+				*dst = src
+				continue
+			}
+			*dst = src
 		}
 	}
 
@@ -408,7 +458,7 @@ func processShore(ctx context.Context, terrain [][]Terrain) []Coord {
 						break
 					}
 				}
-			} else {
+			} else if tile.Type == Water {
 				// Water tile adjacent to land is shoreline
 				for _, c := range buf[:n] {
 					if terrain[c.X][c.Y].Type == Land {
@@ -418,6 +468,7 @@ func processShore(ctx context.Context, terrain [][]Terrain) []Coord {
 					}
 				}
 			}
+			// Impassable tiles: never shoreline (renders as background, no outline)
 		}
 	}
 
@@ -473,6 +524,33 @@ func processDistToLand(ctx context.Context, shorelineWaters []Coord, terrain [][
 	}
 }
 
+// setImpassableNeighborWaterDepth forces water tiles adjacent to impassable
+// terrain to deep-water magnitude.  Without this, the processDistToLand BFS
+// assigns them a shallow magnitude (close to "land"), producing a visible
+// depth gradient next to impassable terrain.  Impassable terrain is void —
+// like the map edge — so the water beside it should be uniformly deep.
+func setImpassableNeighborWaterDepth(ctx context.Context, terrain [][]Terrain) {
+	width := len(terrain)
+	height := len(terrain[0])
+	const deepMagnitude = 20 // packed as 10 (÷2), matches max render depth
+
+	var buf [4]Coord
+	for x := 0; x < width; x++ {
+		for y := 0; y < height; y++ {
+			if terrain[x][y].Type != Water {
+				continue
+			}
+			n := neighborCoords(x, y, width, height, &buf)
+			for _, c := range buf[:n] {
+				if terrain[c.X][c.Y].Type == Impassable {
+					terrain[x][y].Magnitude = deepMagnitude
+					break
+				}
+			}
+		}
+	}
+}
+
 // neighborCoords fills out with the valid orthogonal neighbours of (x, y) and
 // returns the count. out must be a caller-allocated [4]Coord buffer; by
 // reusing the same buffer across calls the caller avoids any heap allocation.
@@ -503,9 +581,13 @@ func neighborCoords(x, y, width, height int, out *[4]Coord) int {
 // It finds all connected water bodies and marks the largest one as Ocean.
 // If removeSmall is true, lakes smaller than minLakeSize are converted to Land.
 // Finally, it triggers shoreline identification and distance-to-land calculations.
-func processWater(ctx context.Context, terrain [][]Terrain, removeSmall bool) {
+func processWater(ctx context.Context, terrain [][]Terrain, removeSmall bool, lakeSizes ...int) {
 	logger := LoggerFromContext(ctx)
 	logger.Info("Processing water bodies")
+	lakeThreshold := defaultMinLakeSize
+	if len(lakeSizes) > 0 && lakeSizes[0] > 0 {
+		lakeThreshold = lakeSizes[0]
+	}
 	width := len(terrain)
 	height := len(terrain[0])
 	visited := make([]bool, width*height)
@@ -564,7 +646,7 @@ func processWater(ctx context.Context, terrain [][]Terrain, removeSmall bool) {
 			// Remove small water bodies
 			logger.Info("Searching for small water bodies for removal")
 			for w := 1; w < len(waterBodies); w++ {
-				if waterBodies[w].size < minLakeSize {
+				if waterBodies[w].size < lakeThreshold {
 					logger.Debug(fmt.Sprintf("Removing small lake at %d,%d (size %d)", waterBodies[w].coords[0].X, waterBodies[w].coords[0].Y, waterBodies[w].size), RemovalLogTag)
 					smallLakes++
 					for _, coord := range waterBodies[w].coords {
@@ -573,7 +655,7 @@ func processWater(ctx context.Context, terrain [][]Terrain, removeSmall bool) {
 					}
 				}
 			}
-			logger.Info(fmt.Sprintf("Identified and removed %d bodies of water smaller than %d tiles", smallLakes, minLakeSize))
+			logger.Info(fmt.Sprintf("Identified and removed %d bodies of water smaller than %d tiles", smallLakes, lakeThreshold))
 		}
 
 		// Process shorelines and distances
@@ -679,6 +761,9 @@ func removeSmallIslands(ctx context.Context, terrain [][]Terrain, minSize int, r
 //   - Bit 5: Ocean
 //   - Bits 0-4: Magnitude (0-31). For Water, this is (Distance / 2).
 //
+// Impassable tiles are encoded as 0b10011111 (isLand=1, magnitude=31) and are
+// NOT counted in numLandTiles (they cannot be owned/attacked/nuked).
+//
 // Returns the packed data and the count of land tiles.
 func packTerrain(ctx context.Context, terrain [][]Terrain) (data []byte, numLandTiles int) {
 	width := len(terrain)
@@ -689,6 +774,14 @@ func packTerrain(ctx context.Context, terrain [][]Terrain) (data []byte, numLand
 	for x := 0; x < width; x++ {
 		for y := 0; y < height; y++ {
 			tile := terrain[x][y]
+
+			if tile.Type == Impassable {
+				// Impassable: isLand=1, magnitude=31, no shoreline, no ocean.
+				// Not counted as a land tile (can't be owned/attacked/nuked).
+				packedData[y*width+x] = 0b10011111
+				continue
+			}
+
 			var packedByte byte = 0
 
 			if tile.Type == Land {
@@ -764,6 +857,9 @@ type RGBA struct {
 // color schemes.
 //
 // For thumbnail purposes, the terrain type -> color mapping:
+//   - Impassable: (Transparent) — renders as the map background in-game, so
+//     the thumbnail matches by being transparent (the map picker background
+//     shows through).
 //   - Water Shoreline: (Transparent)
 //   - Deep Water: (Transparent)
 //   - Land Shoreline: `rgb(204, 203, 158)`
@@ -771,6 +867,9 @@ type RGBA struct {
 //   - Highlands (Mag 10-19): `rgb(220, 203, 158)` - `rgb(238, 221, 176)`
 //   - Mountains (Mag >= 20): `rgb(240, 240, 240)` - `rgb(245, 245, 245)`
 func getThumbnailColor(t Terrain) RGBA {
+	if t.Type == Impassable {
+		return RGBA{R: 0, G: 0, B: 0, A: 0}
+	}
 	if t.Type == Water {
 		// Shoreline water
 		if t.Shoreline {
