@@ -1235,10 +1235,10 @@ export class HostLobbyModal extends BaseModal {
 }
 
 async function createLobby(): Promise<GameInfo> {
-  // Send JWT token for creator identification - server extracts persistentID from it
-  // persistentID should never be exposed to other clients
-  const token = await getPlayToken();
   try {
+    // Send JWT token for creator identification - server extracts persistentID from it
+    // persistentID should never be exposed to other clients
+    const token = await getPlayToken();
     // No worker prefix and no id: nginx (prod) / the vite dev proxy randomly
     // routes to a worker, which mints a self-owned id and returns it.
     const response = await fetch(`/api/create_game`, {

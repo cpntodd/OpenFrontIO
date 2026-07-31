@@ -1,6 +1,6 @@
 {
   "name": "openfront-client",
-  "version": "0.24.0",
+  "version": "0.32.17",
   "description": "OpenFront.io - Real-time multiplayer territorial strategy game",
   "main": "electron-dist/main.js",
   "scripts": {

@@ -104,11 +104,14 @@
       async
     ></script>
 
-    <!-- Cloudflare Turnstile -->
+    <!-- Cloudflare Turnstile. Explicit rendering is used by the join flow. -->
+    <link rel="preconnect" href="https://challenges.cloudflare.com" />
     <script
-      src="https://challenges.cloudflare.com/turnstile/v0/api.js"
+      src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit"
       async
       defer
+      onload="window.turnstileScriptLoaded = true"
+      onerror="window.turnstileScriptError = true"
     ></script>
 
     <script data-cfasync="false">
@@ -201,9 +204,46 @@
       <desktop-nav-bar></desktop-nav-bar>
 
       <div
-        id="turnstile-container"
-        class="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-99999"
-      ></div>
+        id="turnstile-verification"
+        class="hidden fixed inset-0 z-[99999] items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="turnstile-verification-title"
+        aria-hidden="true"
+      >
+        <div
+          class="w-full max-w-md rounded-2xl border border-white/15 bg-[#17191f] p-6 shadow-2xl"
+        >
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <p
+                id="turnstile-verification-title"
+                class="text-sm font-bold uppercase tracking-widest text-white"
+              >
+                Verify to join
+              </p>
+              <p
+                id="turnstile-verification-status"
+                class="mt-2 text-sm text-white/65"
+                aria-live="polite"
+              >
+                Verifying your connection...
+              </p>
+            </div>
+            <button
+              id="turnstile-verification-cancel"
+              type="button"
+              class="rounded-lg px-3 py-2 text-xs font-bold uppercase tracking-wider text-white/55 transition-colors hover:bg-white/10 hover:text-white"
+            >
+              Cancel
+            </button>
+          </div>
+          <div
+            id="turnstile-container"
+            class="mt-5 flex min-h-[65px] justify-center"
+          ></div>
+        </div>
+      </div>
 
       <homepage-promos></homepage-promos>
 
@@ -263,6 +303,8 @@
           id="page-lan"
           class="hidden w-full page-content relative z-50"
         ></lan-lobby-modal>
+
+        <server-selector-modal></server-selector-modal>
 
         <clan-modal
           id="page-clan"

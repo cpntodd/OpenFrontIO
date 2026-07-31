@@ -44,6 +44,10 @@ export class DesktopNavBar extends LitElement {
     });
   }
 
+  private _onServerClick() {
+    document.dispatchEvent(new CustomEvent("show-server-selector"));
+  }
+
   render() {
     window.currentPageId ??= "page-play";
     const currentPage = window.currentPageId;
@@ -157,6 +161,12 @@ export class DesktopNavBar extends LitElement {
           class="nav-menu-item nav-desktop-only text-white/70 hover:text-malibu-blue font-medium tracking-wider uppercase cursor-pointer transition-colors [&.active]:text-malibu-blue "
           data-page="page-map-gen"
           data-i18n="main.map_generator"
+        ></button>
+        <!-- Desktop-only: Change Server -->
+        <button
+          class="nav-menu-item nav-desktop-only text-white/70 hover:text-malibu-blue font-medium tracking-wider uppercase cursor-pointer transition-colors"
+          data-i18n="main.change_server"
+          @click=${this._onServerClick}
         ></button>
         <button
           id="nav-account-button"

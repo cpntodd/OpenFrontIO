@@ -175,7 +175,15 @@ export class RankedModal extends BaseModal {
   private async handleRanked() {
     if ((await userAuth()) === false) {
       this.close();
-      window.showPage?.("page-account");
+      window.dispatchEvent(
+        new CustomEvent("show-message", {
+          detail: {
+            message: translateText("matchmaking_button.must_login"),
+            color: "red",
+            duration: 5000,
+          },
+        }),
+      );
       return;
     }
 

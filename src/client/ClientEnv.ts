@@ -42,6 +42,10 @@ export class ClientEnv {
       jwtAudience: bc.jwtAudience,
       instanceId: bc.instanceId,
       gitCommit: bc.gitCommit,
+      serverHost:
+        typeof bc.serverHost === "string" && bc.serverHost.length > 0
+          ? bc.serverHost
+          : bc.jwtAudience,
     };
     return ClientEnv.values;
   }
@@ -73,6 +77,14 @@ export class ClientEnv {
     return audience === "localhost"
       ? "http://localhost:8787"
       : `https://api.${audience}`;
+  }
+  /** WebSocket origin for game and public-lobby workers. */
+  static serverWsBase(): string {
+    const host = ClientEnv.get().serverHost;
+    if (ClientEnv.env() === GameEnv.Dev && !host.includes(".")) {
+      return `ws://${host}`;
+    }
+    return `wss://${host}`;
   }
   /** WebSocket origin for API services such as ranked matchmaking. */
   static matchmakingWsBase(): string {
@@ -132,4 +144,5 @@ export interface ClientEnvValues {
   jwtAudience: string;
   instanceId: string;
   gitCommit: string;
+  serverHost: string;
 }

@@ -3,7 +3,9 @@ import { UserSettings } from "src/core/game/UserSettings";
 import { z } from "zod";
 import { TokenPayload, TokenPayloadSchema } from "../core/ApiSchemas";
 import { base64urlToUuid } from "../core/Base64";
+import { GameEnv } from "../core/configuration/Config";
 import { getApiBase, getAudience } from "./Api";
+import { ClientEnv } from "./ClientEnv";
 import { crazyGamesSDK } from "./CrazyGamesSDK";
 import { generateCryptoRandomUUID } from "./Utils";
 
@@ -38,12 +40,27 @@ function isDesktop(): boolean {
 }
 
 /**
- * Desktop OAuth flow: opens the system browser to the openfront.io API
- * login endpoint with a redirect back to our local callback server.
- * After auth, the local server receives the token and the app auto-logs in.
+ * Desktop OAuth flow: opens an embedded authentication broker. Electron
+ * hands the resulting session cookie or one-time login token to the main
+ * renderer, which confirms the session before the broker closes.
  */
 function desktopOAuth(provider: string): void {
-  window.electronAPI?.["oauth-login"]?.(provider);
+  const login = window.electronAPI?.["oauth-login"]?.(provider);
+  if (!login) return;
+  void login.then((result) => {
+    if (result.status === "failed") {
+      console.error("Desktop OAuth failed:", result.error);
+      window.dispatchEvent(
+        new CustomEvent("show-message", {
+          detail: {
+            message: result.error ?? "Login failed. Please try again.",
+            color: "red",
+            duration: 6000,
+          },
+        }),
+      );
+    }
+  });
 }
 
 // Link a Google account to the currently logged-in player. Unlike login this is
@@ -198,6 +215,43 @@ export async function userAuth(
   }
 }
 
+/**
+ * Revalidate the desktop session after the OAuth broker has copied its
+ * refresh cookie into the main renderer's origin. The JWT remains memory-only;
+ * the persistent credential is the HTTP-only Electron session cookie.
+ */
+export async function refreshDesktopAuth(): Promise<UserAuth> {
+  if (__refreshPromise) {
+    await __refreshPromise.catch(() => {});
+  }
+  __jwt = null;
+  __expiresAt = 0;
+  await refreshJwt();
+  return userAuth(false);
+}
+
+/**
+ * Accept the short-lived JWT returned by the already authenticated OAuth
+ * broker. The token never enters localStorage; the refresh cookie remains the
+ * persistent credential in Electron's session.
+ */
+export async function acceptDesktopAuthSession(
+  jwt: string,
+  expiresIn: number,
+): Promise<UserAuth> {
+  if (
+    typeof jwt !== "string" ||
+    jwt.length === 0 ||
+    !Number.isFinite(expiresIn) ||
+    expiresIn <= 0
+  ) {
+    return false;
+  }
+  __jwt = jwt;
+  __expiresAt = Date.now() + expiresIn * 1000;
+  return userAuth(false);
+}
+
 async function refreshJwt(): Promise<void> {
   if (__refreshPromise) {
     return __refreshPromise;
@@ -233,6 +287,16 @@ async function doRefreshJwt(): Promise<void> {
     }
     const json = await response.json();
     const { jwt, expiresIn } = json;
+    if (
+      typeof jwt !== "string" ||
+      typeof expiresIn !== "number" ||
+      !Number.isFinite(expiresIn) ||
+      expiresIn <= 0
+    ) {
+      console.error("Refresh returned an invalid session payload");
+      __jwt = null;
+      return;
+    }
     __expiresAt = Date.now() + expiresIn * 1000;
     console.log("Refresh succeeded");
     __jwt = jwt;
@@ -262,6 +326,16 @@ async function doCrazyGamesLogin(token: string): Promise<void> {
     }
     const json = await response.json();
     const { jwt, expiresIn } = json;
+    if (
+      typeof jwt !== "string" ||
+      typeof expiresIn !== "number" ||
+      !Number.isFinite(expiresIn) ||
+      expiresIn <= 0
+    ) {
+      console.error("CrazyGames login returned an invalid session payload");
+      __jwt = null;
+      return;
+    }
     __expiresAt = Date.now() + expiresIn * 1000;
     console.log("CrazyGames login succeeded");
     __jwt = jwt;
@@ -329,7 +403,8 @@ export async function sendMagicLink(email: string): Promise<boolean> {
 export async function getPlayToken(): Promise<string> {
   const result = await userAuth();
   if (result !== false) return result.jwt;
-  return getPersistentIDFromLocalStorage();
+  if (ClientEnv.env() === GameEnv.Dev) return getPersistentIDFromLocalStorage();
+  throw new Error("Unable to obtain a signed online play session");
 }
 
 // WARNING: DO NOT EXPOSE THIS ID

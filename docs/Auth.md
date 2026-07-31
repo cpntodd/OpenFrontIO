@@ -22,3 +22,20 @@ JWT verification happens once at WebSocket connection time. After that, the esta
 ## Development Mode
 
 When running the game in development, the API server is not active, so the game falls back to checking only persistentIDs for verification instead of JWTs. This is less secure, as stealing a persistentID means the attacker has indefinite control of the victim's account.
+
+## Desktop client
+
+The Electron client serves its renderer from a stable local HTTP origin and
+copies the OAuth broker's HTTP-only refresh cookie into that origin. The main
+renderer confirms `/auth/refresh` before the broker window closes; the short-
+lived JWT remains in memory and is refreshed when it becomes stale.
+
+The local persistent UUID is a device identifier only. It is accepted by the
+development server but must never be sent as the production play token. A
+production desktop build requires an API-issued JWT and a real production
+Turnstile sitekey configured through `OPENFRONT_TURNSTILE_SITE_KEY` when the
+desktop bundle is built. The widget must allow the desktop renderer's
+`127.0.0.1` hostname (and the server's Turnstile secret must belong to the
+same widget); a website-only hostname configuration will reject desktop
+tokens. Turnstile response tokens are generated immediately before a first
+join, are single-use, and are never persisted.

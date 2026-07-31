@@ -33,6 +33,7 @@ export default [
             "__mocks__/fileMock.js",
             "eslint.config.js",
             "scripts/sync-assets.mjs",
+            "scripts/write-electron-config.mjs",
           ],
         },
         tsconfigRootDir: import.meta.dirname,

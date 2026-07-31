@@ -35,7 +35,10 @@ export interface ElectronAPI {
 
   // ── Server lifecycle ──
   server: {
-    start(config?: { port?: number; gameConfig?: unknown }): Promise<ServerStatus>;
+    start(config?: {
+      port?: number;
+      gameConfig?: unknown;
+    }): Promise<ServerStatus>;
     stop(): Promise<{ status: "stopped" }>;
     status(): Promise<ServerStatus>;
   };
@@ -44,7 +47,10 @@ export interface ElectronAPI {
   lan: {
     discover(): Promise<LanGame[]>;
     stopDiscovery(): Promise<void>;
-    connect(host: string, port: number): Promise<{ host: string; port: number }>;
+    connect(
+      host: string,
+      port: number,
+    ): Promise<{ host: string; port: number }>;
   };
 
   // ── Map generator ──
@@ -67,7 +73,18 @@ export interface ElectronAPI {
   openExternal(url: string): Promise<void>;
 
   // ── OAuth login ──
-  "oauth-login"(provider: string): Promise<void>;
+  "oauth-login"(provider: string): Promise<OAuthLoginResult>;
+  "oauth-authenticated"(): Promise<boolean>;
+  "oauth-failed"(reason?: string): Promise<boolean>;
+
+  // ── Server config ──
+  serverConfig: {
+    get(): Promise<ServerConfigResponse>;
+    set(host: string): Promise<{ success: boolean }>;
+  };
+
+  // ── Turnstile (desktop-only) ──
+  getTurnstileToken(): Promise<TurnstileTokenResult>;
 
   // ── Events (main -> renderer) ──
   on(channel: string, callback: (...args: unknown[]) => void): () => void;
@@ -81,6 +98,16 @@ export interface SyncResult {
   skipped: number;
   failed: number;
   totalBytes: number;
+  error?: string;
+}
+
+export interface OAuthLoginResult {
+  status: "authenticated" | "cancelled" | "failed";
+  error?: string;
+}
+
+export interface TurnstileTokenResult {
+  token: string | null;
   error?: string;
 }
 
@@ -154,6 +181,18 @@ export interface CustomMapList {
   assetBaseUrl: string | null;
 }
 
+export interface ServerProfile {
+  host: string;
+  audience: string;
+  env: string;
+  workers: number;
+}
+
+export interface ServerConfigResponse {
+  current: ServerProfile;
+  presets: Record<string, ServerProfile>;
+}
+
 // ── Bridge ─────────────────────────────────────────────────
 
 const electronAPI: ElectronAPI = {
@@ -194,6 +233,16 @@ const electronAPI: ElectronAPI = {
   openExternal: (url: string) => ipcRenderer.invoke("app:open-external", url),
   "oauth-login": (provider: string) =>
     ipcRenderer.invoke("app:oauth-login", provider),
+  "oauth-authenticated": () => ipcRenderer.invoke("app:oauth-authenticated"),
+  "oauth-failed": (reason?: string) =>
+    ipcRenderer.invoke("app:oauth-failed", reason),
+
+  serverConfig: {
+    get: () => ipcRenderer.invoke("server-config:get"),
+    set: (host: string) => ipcRenderer.invoke("server-config:set", host),
+  },
+
+  getTurnstileToken: () => ipcRenderer.invoke("turnstile:get-token"),
 
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]) =>

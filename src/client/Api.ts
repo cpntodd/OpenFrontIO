@@ -331,6 +331,17 @@ export function getApiBase() {
 }
 
 export function getAudience() {
+  // Electron serves the renderer from a loopback origin. The server audience
+  // is injected into BOOTSTRAP_CONFIG, so prefer it over deriving an audience
+  // from 127.0.0.1 (which would otherwise become the invalid domain "0.1").
+  const configuredAudience =
+    typeof window !== "undefined"
+      ? window.BOOTSTRAP_CONFIG?.jwtAudience
+      : undefined;
+  if (typeof configuredAudience === "string" && configuredAudience.length > 0) {
+    return configuredAudience;
+  }
+
   const { hostname } = new URL(window.location.href);
   const domainname = hostname.split(".").slice(-2).join(".");
   return domainname;

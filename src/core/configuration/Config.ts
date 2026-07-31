@@ -34,6 +34,7 @@ declare global {
       turnstileSiteKey?: string;
       jwtAudience?: string;
       instanceId?: string;
+      serverHost?: string;
     };
   }
 }

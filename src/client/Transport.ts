@@ -197,11 +197,14 @@ export class Transport {
 
   private pingInterval: number | null = null;
   public readonly isLocal: boolean;
+  private readonly onConnectionFailed?: (reason: string) => void;
 
   constructor(
     private lobbyConfig: LobbyConfig,
     private eventBus: EventBus,
+    onConnectionFailed?: (reason: string) => void,
   ) {
+    this.onConnectionFailed = onConnectionFailed;
     // If gameRecord is not null, we are replaying an archived game.
     // For multiplayer games, GameConfig is not known until game starts.
     this.isLocal =
@@ -341,10 +344,8 @@ export class Transport {
   ) {
     this.startPing();
     this.killExistingSocket();
-    const wsHost = window.location.host;
-    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const workerPath = ClientEnv.workerPath(this.lobbyConfig.gameID);
-    this.socket = new WebSocket(`${wsProtocol}//${wsHost}/${workerPath}`);
+    this.socket = new WebSocket(`${ClientEnv.serverWsBase()}/${workerPath}`);
     this.onconnect = onconnect;
     this.onmessage = onmessage;
     this.socket.onopen = () => {
@@ -389,6 +390,9 @@ export class Transport {
         `WebSocket closed. Code: ${event.code}, Reason: ${event.reason}`,
       );
       if (event.code === 1002) {
+        this.onConnectionFailed?.(
+          event.reason ?? "The server refused the connection",
+        );
         showInGameAlert(
           translateText("error_modal.connection_refused", {
             reason: event.reason,
@@ -412,26 +416,40 @@ export class Transport {
   }
 
   async joinGame() {
-    this.sendMsg({
-      type: "join",
-      gameID: this.lobbyConfig.gameID,
-      // Note: clientID is not sent - server assigns it based on persistentID
-      username: this.lobbyConfig.playerName,
-      clanTag: this.lobbyConfig.playerClanTag ?? null,
-      cosmetics: this.lobbyConfig.cosmetics,
-      turnstileToken: this.lobbyConfig.turnstileToken,
-      token: await getPlayToken(),
-    } satisfies ClientJoinMessage);
+    try {
+      this.sendMsg({
+        type: "join",
+        gameID: this.lobbyConfig.gameID,
+        // Note: clientID is not sent - server assigns it based on persistentID
+        username: this.lobbyConfig.playerName,
+        clanTag: this.lobbyConfig.playerClanTag ?? null,
+        cosmetics: this.lobbyConfig.cosmetics,
+        turnstileToken: this.lobbyConfig.turnstileToken,
+        token: await getPlayToken(),
+      } satisfies ClientJoinMessage);
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "Authentication failed";
+      console.error("Unable to authenticate the lobby join:", error);
+      this.onConnectionFailed?.(reason);
+    }
   }
 
   async rejoinGame(lastTurn: number) {
-    this.sendMsg({
-      type: "rejoin",
-      gameID: this.lobbyConfig.gameID,
-      // Note: clientID is not sent - server looks it up from persistentID in token
-      lastTurn: lastTurn,
-      token: await getPlayToken(),
-    } satisfies ClientRejoinMessage);
+    try {
+      this.sendMsg({
+        type: "rejoin",
+        gameID: this.lobbyConfig.gameID,
+        // Note: clientID is not sent - server looks it up from persistentID in token
+        lastTurn: lastTurn,
+        token: await getPlayToken(),
+      } satisfies ClientRejoinMessage);
+    } catch (error) {
+      const reason =
+        error instanceof Error ? error.message : "Authentication failed";
+      console.error("Unable to authenticate the lobby rejoin:", error);
+      this.onConnectionFailed?.(reason);
+    }
   }
 
   leaveGame() {

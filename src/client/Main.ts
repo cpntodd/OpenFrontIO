@@ -17,7 +17,12 @@ import "./AccountModal";
 import { adGatekeeper } from "./AdGatekeeper";
 import { loadAdmiral, onAdmiralMeasured } from "./Admiral";
 import { getUserMe, invalidateUserMe } from "./Api";
-import { reauthAfterCrazyGamesChange, userAuth } from "./Auth";
+import {
+  acceptDesktopAuthSession,
+  reauthAfterCrazyGamesChange,
+  refreshDesktopAuth,
+  userAuth,
+} from "./Auth";
 import "./ClanModal";
 import { joinLobby, type JoinLobbyResult } from "./ClientGameRunner";
 import { getPlayerCosmeticsRefs } from "./Cosmetics";
@@ -39,12 +44,12 @@ import "./HomepagePromos";
 import { HostLobbyModal as HostPrivateLobbyModal } from "./HostLobbyModal";
 import { showInGameConfirm } from "./InGameModal";
 import { JoinLobbyModal } from "./JoinLobbyModal";
+import "./LanLobbyModal";
 import "./LangSelector";
 import { LangSelector } from "./LangSelector";
 import { initLayout } from "./Layout";
 import "./LeaderboardModal";
 import "./MapGeneratorModal";
-import "./LanLobbyModal";
 import "./Matchmaking";
 import { MatchmakingModal } from "./Matchmaking";
 import { modalRouter } from "./ModalRouter";
@@ -176,6 +181,8 @@ function updateAccountNavButton(userMeResponse: UserMeResponse | false) {
 declare global {
   interface Window {
     turnstile: any;
+    turnstileScriptLoaded?: boolean;
+    turnstileScriptError?: boolean;
     adsEnabled: boolean;
     PageOS: {
       session: {
@@ -246,42 +253,98 @@ export interface JoinLobbyEvent {
 
 // ── Turnstile token manager ──────────────────────────────
 // Manages Turnstile token lifecycle to prevent duplicate widget creation and
-// Cloudflare 429 rate limits. Tokens are prefetched, then consumed exactly
-// once by the next online join because Turnstile tokens are single-use. Only
-// one widget is ever active.
+// Cloudflare 429 rate limits. Desktop sessions prefetch a token after an
+// authenticated account is restored, then consume it exactly once because
+// Turnstile tokens are single-use. Only one widget is ever active.
 
-const TOKEN_TTL_MS = 3 * 60 * 1000;
-const TOKEN_GENERATION_TIMEOUT_MS = 15 * 1000;
+// Cloudflare tokens are valid for five minutes and are single-use. Keep a
+// small safety margin so a token cannot sit in the lobby flow until it is
+// close to expiry. Tokens are never written to storage.
+const TOKEN_TTL_MS = 4 * 60 * 1000;
+const TOKEN_GENERATION_TIMEOUT_MS = 60 * 1000;
+const TURNSTILE_SCRIPT_TIMEOUT_MS = 15 * 1000;
+const TEST_TURNSTILE_SITE_KEY = "1x00000000000000000000AA";
 
 class TurnstileTokenManager {
   private currentToken: { token: string; createdAt: number } | null = null;
-  private pendingPromise: Promise<{ token: string; createdAt: number }> | null = null;
-
-  prefetch(): void {
-    void this.ensureToken();
-  }
+  private pendingPromise: Promise<{ token: string; createdAt: number }> | null =
+    null;
+  private prefetchPromise: Promise<void> | null = null;
+  private activeWidgetId: string | number | null = null;
+  private activeReject: ((reason?: unknown) => void) | null = null;
+  private consumptionQueue: Promise<void> = Promise.resolve();
+  private generationCancelled = false;
+  private lastError: string | null = null;
 
   async takeToken(): Promise<string | null> {
+    const previous = this.consumptionQueue;
+    let release!: () => void;
+    this.consumptionQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
     try {
-      const result = await this.ensureToken();
-      if (result === null) return null;
+      this.lastError = null;
+      const result = await this.ensureToken(true);
 
       // A Turnstile token may only be submitted once. Clear it before
       // returning so a second join cannot accidentally replay it.
       if (this.currentToken?.token === result.token) {
         this.currentToken = null;
       }
+      this.setVerificationVisible(false);
       return result.token;
     } catch (err) {
       console.error("[Turnstile] Token generation failed:", err);
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.includes("cancelled")) this.lastError = message;
+      this.setVerificationVisible(false);
       return null;
+    } finally {
+      release();
     }
   }
 
-  private async ensureToken(): Promise<{
-    token: string;
-    createdAt: number;
-  } | null> {
+  cancel(): void {
+    this.generationCancelled = true;
+    this.activeReject?.(new Error("Turnstile verification cancelled"));
+    this.activeReject = null;
+    this.removeActiveWidget();
+    this.setVerificationVisible(false);
+  }
+
+  /**
+   * Start desktop verification as soon as a linked account is restored.
+   * Failures stay silent here; the join path reports them if a token is still
+   * unavailable when the player actually joins.
+   */
+  async prefetch(): Promise<void> {
+    if (
+      !isDesktopShell() ||
+      ClientEnv.env() === GameEnv.Dev ||
+      !window.electronAPI?.getTurnstileToken
+    ) {
+      return;
+    }
+    if (this.prefetchPromise) return this.prefetchPromise;
+
+    this.prefetchPromise = this.ensureToken(false)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        console.warn(
+          "[Turnstile] Background verification was not completed:",
+          error,
+        );
+      })
+      .finally(() => {
+        this.prefetchPromise = null;
+      });
+    return this.prefetchPromise;
+  }
+
+  private async ensureToken(
+    showWebVerification: boolean,
+  ): Promise<{ token: string; createdAt: number }> {
     if (this.currentToken) {
       if (Date.now() < this.currentToken.createdAt + TOKEN_TTL_MS) {
         return this.currentToken;
@@ -293,15 +356,13 @@ class TurnstileTokenManager {
       return this.pendingPromise;
     }
 
-    const pending = this.generateToken();
+    this.generationCancelled = false;
+    const pending = this.generateToken(showWebVerification);
     this.pendingPromise = pending;
     try {
       const result = await pending;
       this.currentToken = result;
       return result;
-    } catch (err) {
-      console.error("[Turnstile] Token generation failed:", err);
-      return null;
     } finally {
       if (this.pendingPromise === pending) {
         this.pendingPromise = null;
@@ -309,59 +370,192 @@ class TurnstileTokenManager {
     }
   }
 
-  private async generateToken(): Promise<{ token: string; createdAt: number }> {
-    let attempts = 0;
-    while (typeof window.turnstile === "undefined" && attempts < 100) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      attempts++;
+  getLastError(): string | null {
+    return this.lastError;
+  }
+
+  private async generateToken(
+    showWebVerification: boolean,
+  ): Promise<{ token: string; createdAt: number }> {
+    // On the desktop shell, the Turnstile widget must render on the
+    // openfront.io domain (the site key is only authorised there). The main
+    // process runs the widget in an embedded verification view and keeps that
+    // view hidden unless Cloudflare requires interaction.
+    const desktopApi = (window as any).electronAPI;
+    if (desktopApi?.getTurnstileToken) {
+      const result = await desktopApi.getTurnstileToken();
+      if (!result?.token) {
+        throw new Error(
+          result?.error ?? "Security verification was not completed.",
+        );
+      }
+      return { token: result.token, createdAt: Date.now() };
     }
-    if (typeof window.turnstile === "undefined") {
-      throw new Error("Failed to load Turnstile script");
+
+    const siteKey = ClientEnv.turnstileSiteKey().trim();
+    if (!siteKey) {
+      throw new Error(
+        "Desktop security verification is not configured. Build with OPENFRONT_TURNSTILE_SITE_KEY.",
+      );
+    }
+    if (
+      ClientEnv.env() === GameEnv.Prod &&
+      siteKey === TEST_TURNSTILE_SITE_KEY
+    ) {
+      throw new Error(
+        "Production security verification is not configured. This build still uses the Turnstile test key.",
+      );
+    }
+
+    if (showWebVerification) {
+      this.setVerificationVisible(true, "Loading the security verification...");
+    }
+    await this.waitForTurnstile();
+    if (this.generationCancelled) {
+      throw new Error("Turnstile verification cancelled");
+    }
+    if (showWebVerification) {
+      this.setVerificationVisible(
+        true,
+        "Complete the security check to join the game.",
+      );
     }
     const container = document.getElementById("turnstile-container");
     if (container) {
       while (container.firstChild) container.removeChild(container.firstChild);
     }
-    const widgetId = window.turnstile.render("#turnstile-container", {
-      sitekey: ClientEnv.turnstileSiteKey(),
-      size: "normal",
-      appearance: "interaction-only",
-      theme: "light",
-      // render() must not start execution implicitly; execute() below is the
-      // single owner of this widget's execution lifecycle.
-      execution: "execute",
-    });
+
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let widgetId: string | number | null = null;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeout);
+        this.activeReject = null;
+        this.removeActiveWidget(widgetId);
+        callback();
+      };
       const timeout = window.setTimeout(() => {
-        window.turnstile.remove(widgetId);
-        reject(new Error("Turnstile token generation timed out"));
+        finish(() => reject(new Error("Turnstile verification timed out")));
       }, TOKEN_GENERATION_TIMEOUT_MS);
-      window.turnstile.execute(widgetId, {
-        callback: (token: string) => {
-          window.clearTimeout(timeout);
-          window.turnstile.remove(widgetId);
-          console.log("[Turnstile] Token received");
-          resolve({ token, createdAt: Date.now() });
-        },
-        "error-callback": (errorCode: string) => {
-          window.clearTimeout(timeout);
-          window.turnstile.remove(widgetId);
-          console.error(`[Turnstile] Error: ${errorCode}`);
-          reject(new Error(`Turnstile failed: ${errorCode}`));
-        },
-      });
+      this.activeReject = (reason?: unknown) =>
+        finish(() =>
+          reject(reason ?? new Error("Turnstile verification cancelled")),
+        );
+      try {
+        // Turnstile's callbacks belong to render(). Passing them to
+        // execute() is ignored by the API. Render mode starts the widget now,
+        // which is exactly when the user has requested an online join.
+        widgetId = window.turnstile.render("#turnstile-container", {
+          sitekey: siteKey,
+          size: "normal",
+          appearance: "always",
+          theme: "dark",
+          retry: "auto",
+          "refresh-expired": "auto",
+          execution: "render",
+          callback: (token: string) => {
+            if (typeof token !== "string" || token.length === 0) {
+              finish(() =>
+                reject(new Error("Turnstile returned an empty token")),
+              );
+              return;
+            }
+            finish(() => {
+              console.log("[Turnstile] Token received");
+              resolve({ token, createdAt: Date.now() });
+            });
+          },
+          "error-callback": (errorCode: string) => {
+            finish(() => {
+              console.error(`[Turnstile] Error: ${errorCode}`);
+              reject(new Error(`Turnstile failed: ${errorCode}`));
+            });
+          },
+          "expired-callback": () => {
+            finish(() => reject(new Error("Turnstile verification expired")));
+          },
+        });
+        this.activeWidgetId = widgetId;
+        // A synchronous callback is not expected, but test keys and future
+        // Turnstile changes should not leave a widget behind in that case.
+        if (settled) this.removeActiveWidget(widgetId);
+      } catch (error) {
+        finish(() =>
+          reject(
+            new Error(
+              `Turnstile execution failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            ),
+          ),
+        );
+      }
     });
+  }
+
+  private async waitForTurnstile(): Promise<void> {
+    const deadline = Date.now() + TURNSTILE_SCRIPT_TIMEOUT_MS;
+    while (typeof window.turnstile === "undefined") {
+      if (this.generationCancelled) {
+        throw new Error("Turnstile verification cancelled");
+      }
+      if (window.turnstileScriptError) {
+        throw new Error(
+          "Cloudflare security verification could not load. Check network access to challenges.cloudflare.com.",
+        );
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          window.turnstileScriptLoaded
+            ? "Cloudflare security verification loaded without exposing its widget API."
+            : "Cloudflare security verification did not load. Check network access to challenges.cloudflare.com.",
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+
+    // Do not call turnstile.ready() here. Turnstile rejects ready() when its
+    // script is loaded with async/defer; the script onload flag plus the
+    // presence of the global API are sufficient before render().
+  }
+
+  private removeActiveWidget(
+    widgetId: string | number | null = this.activeWidgetId,
+  ): void {
+    if (widgetId === this.activeWidgetId) this.activeWidgetId = null;
+    if (widgetId !== null && typeof window.turnstile?.remove === "function") {
+      try {
+        window.turnstile.remove(widgetId);
+      } catch (error) {
+        console.warn("[Turnstile] Failed to remove widget:", error);
+      }
+    }
+    const container = document.getElementById("turnstile-container");
+    if (container) {
+      while (container.firstChild) container.removeChild(container.firstChild);
+    }
+  }
+
+  private setVerificationVisible(
+    visible: boolean,
+    message = "Verifying your connection...",
+  ): void {
+    const panel = document.getElementById("turnstile-verification");
+    const status = document.getElementById("turnstile-verification-status");
+    const cancel = document.getElementById("turnstile-verification-cancel");
+    if (!panel || !status || !cancel) return;
+
+    status.textContent = message;
+    panel.classList.toggle("hidden", !visible);
+    panel.classList.toggle("flex", visible);
+    panel.setAttribute("aria-hidden", visible ? "false" : "true");
+    cancel.onclick = visible ? () => this.cancel() : null;
   }
 }
 
 const turnstileManager = new TurnstileTokenManager();
-
-// Legacy wrapper used by ClientGameRunner for initial prefetch
-async function getTurnstileToken(): Promise<{ token: string; createdAt: number } | null> {
-  const token = await turnstileManager.takeToken();
-  if (!token) return null;
-  return { token, createdAt: Date.now() };
-}
 
 class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
@@ -392,9 +586,15 @@ class Client {
       document.body.appendChild(this.assetSyncBar);
     }
 
-    const fill = this.assetSyncBar.querySelector("#asset-sync-fill") as HTMLElement;
-    const count = this.assetSyncBar.querySelector("#asset-sync-count") as HTMLElement;
-    const file = this.assetSyncBar.querySelector("#asset-sync-file") as HTMLElement;
+    const fill = this.assetSyncBar.querySelector(
+      "#asset-sync-fill",
+    ) as HTMLElement;
+    const count = this.assetSyncBar.querySelector(
+      "#asset-sync-count",
+    ) as HTMLElement;
+    const file = this.assetSyncBar.querySelector(
+      "#asset-sync-file",
+    ) as HTMLElement;
 
     if (progress.total > 0) {
       const pct = Math.round((progress.current / progress.total) * 100);
@@ -433,9 +633,77 @@ class Client {
   private tokenLoginModal: TokenLoginModal;
   private matchmakingModal: MatchmakingModal;
   private mostRecentJoinEvent: number;
+  private desktopOAuthCompleting = false;
+  private pendingDesktopOAuthToken: string | null = null;
+
+  private async handleDesktopOAuthToken(token: string): Promise<void> {
+    this.pendingDesktopOAuthToken = token;
+    await customElements.whenDefined("token-login");
+    if (this.pendingDesktopOAuthToken !== token) return;
+
+    const modal = document.querySelector("token-login") as TokenLoginModal;
+    if (modal && typeof modal.openWithToken === "function") {
+      this.pendingDesktopOAuthToken = null;
+      modal.openWithToken(token);
+      return;
+    }
+
+    console.error("[Main] OAuth token-login component was not mounted");
+    await window.electronAPI?.["oauth-failed"]?.(
+      "The login response could not be opened in the desktop client.",
+    );
+  }
+
+  private async completeDesktopOAuth(session?: {
+    jwt: string;
+    expiresIn: number;
+  }): Promise<void> {
+    if (this.desktopOAuthCompleting) return;
+    this.desktopOAuthCompleting = true;
+    try {
+      const auth = session
+        ? await acceptDesktopAuthSession(session.jwt, session.expiresIn)
+        : await refreshDesktopAuth();
+      if (auth === false) {
+        console.error("[Main] OAuth session could not be refreshed");
+        await window.electronAPI?.["oauth-failed"]?.(
+          "The login completed, but the desktop session could not be refreshed.",
+        );
+        window.dispatchEvent(
+          new CustomEvent("show-message", {
+            detail: {
+              message: "Login could not be completed. Please try again.",
+              color: "red",
+              duration: 5000,
+            },
+          }),
+        );
+        return;
+      }
+
+      invalidateUserMe();
+      await window.electronAPI?.["oauth-authenticated"]?.();
+      console.log("[Main] Desktop session authenticated");
+      // Recreate account-dependent UI from the now-authenticated session. The
+      // HTTP-only refresh cookie remains in Electron's persistent session and
+      // the short-lived JWT is reacquired in memory on the new page.
+      window.location.reload();
+    } catch (error) {
+      console.error("[Main] Desktop OAuth completion failed:", error);
+      await window.electronAPI?.["oauth-failed"]?.(
+        "The desktop session could not be confirmed.",
+      );
+    } finally {
+      this.desktopOAuthCompleting = false;
+    }
+  }
 
   async initialize(): Promise<void> {
-    crazyGamesSDK.maybeInit();
+    // CrazyGames SDK is excluded from the desktop build — no third-party ads
+    // or platform integration on the desktop client.
+    if (!isDesktopShell()) {
+      crazyGamesSDK.maybeInit();
+    }
 
     // Register modals with the URL router. Lobby modals (join/host) and
     // matchmaking are intentionally omitted — they own their own URL state
@@ -482,7 +750,12 @@ class Client {
     // ── Desktop: asset sync progress bar ──
     if (window.electronAPI) {
       window.electronAPI.on("asset-sync:progress", ((progress: unknown) => {
-        const p = progress as { phase: string; current: number; total: number; fileName?: string };
+        const p = progress as {
+          phase: string;
+          current: number;
+          total: number;
+          fileName?: string;
+        };
         this.updateAssetSyncProgress(p);
       }) as (...args: unknown[]) => void);
 
@@ -490,25 +763,38 @@ class Client {
       window.electronAPI.on("oauth:token", ((token: unknown) => {
         if (typeof token !== "string" || token.length === 0) return;
         if (token === "REFRESH") {
-          // Auth cookies were copied to the local session by the main process.
-          // Reload so the refresh flow exchanges them for a JWT.
-          console.log("[Main] Auth cookies copied, refreshing session...");
-          window.location.reload();
+          // Backwards-compatible event used by older Electron builds.
+          void this.completeDesktopOAuth();
           return;
         }
         console.log("[Main] OAuth token received, completing login...");
-        const modal = document.querySelector("token-login") as TokenLoginModal;
-        if (modal && typeof modal.openWithToken === "function") {
-          modal.openWithToken(token);
+        void this.handleDesktopOAuthToken(token);
+      }) as (...args: unknown[]) => void);
+      window.electronAPI.on("oauth:session-ready", ((payload: unknown) => {
+        if (typeof payload !== "string") return;
+        try {
+          const session = JSON.parse(payload) as {
+            jwt?: unknown;
+            expiresIn?: unknown;
+          };
+          if (
+            typeof session.jwt !== "string" ||
+            typeof session.expiresIn !== "number"
+          ) {
+            throw new Error("Invalid desktop OAuth session payload");
+          }
+          void this.completeDesktopOAuth({
+            jwt: session.jwt,
+            expiresIn: session.expiresIn,
+          });
+        } catch (error) {
+          console.error("[Main] Invalid desktop OAuth session:", error);
+          void this.completeDesktopOAuth();
         }
       }) as (...args: unknown[]) => void);
     }
     modalRouter.register("cosmetics", { tag: "cosmetics-modal" });
     modalRouter.register("flag-input", { tag: "flag-input-modal" });
-
-    // Prefetch turnstile token so it is available when the user joins a lobby.
-    // Prefetch without consuming; the next online join takes this token once.
-    turnstileManager.prefetch();
 
     // Wait for components to render before setting version
     await customElements.whenDefined("mobile-nav-bar");
@@ -717,6 +1003,17 @@ class Client {
           `Your player ID is ${userMeResponse.player.publicId}\n` +
             "Sharing this ID will allow others to view your game history and stats.",
         );
+
+        // A linked desktop session can complete Turnstile while the player is
+        // still on the home/account UI. The resulting token is kept only in
+        // memory and consumed by the first online join.
+        if (
+          isDesktopShell() &&
+          (userMeResponse.user.discord !== undefined ||
+            userMeResponse.user.email !== undefined)
+        ) {
+          void turnstileManager.prefetch();
+        }
       }
     };
 
@@ -1059,12 +1356,54 @@ class Client {
     if (lobby.source !== "public") {
       this.updateJoinUrlForShare(lobby.gameID);
     }
+    const turnstileToken = await this.getTurnstileToken(lobby);
+    const needsTurnstile =
+      ClientEnv.env() !== GameEnv.Dev &&
+      lobby.gameStartInfo?.config.gameType !== GameType.Singleplayer;
+    if (needsTurnstile && turnstileToken === null) {
+      this.joinModal?.close();
+      history.replaceState(null, "", "/");
+      const verificationError = turnstileManager.getLastError();
+      window.dispatchEvent(
+        new CustomEvent("show-message", {
+          detail: {
+            message: verificationError
+              ? `Security verification could not be completed: ${verificationError}`
+              : "Security verification could not be completed. Please try again.",
+            color: "red",
+            duration: 6000,
+          },
+        }),
+      );
+      return;
+    }
+
+    // Loading the embedded official-origin verification page also gives the
+    // API a chance to establish/refresh this installation's anonymous
+    // session. Resolve auth afterwards so normal public play receives the
+    // signed guest JWT without opening an OAuth provider.
     const auth = await userAuth();
+    if (ClientEnv.env() !== GameEnv.Dev && auth === false) {
+      this.joinModal?.close();
+      history.replaceState(null, "", "/");
+      window.dispatchEvent(
+        new CustomEvent("show-message", {
+          detail: {
+            message:
+              "Unable to establish an online play session. Please try joining again.",
+            color: "red",
+            duration: 5000,
+          },
+        }),
+      );
+      return;
+    }
     const playerRole = auth !== false ? (auth.claims.role ?? null) : null;
+
     const newLobbyHandle = joinLobby(this.eventBus, {
       gameID: lobby.gameID,
       cosmetics: await getPlayerCosmeticsRefs(),
-      turnstileToken: await this.getTurnstileToken(lobby),
+      turnstileToken,
       playerName: this.usernameInput?.getUsername() ?? genAnonUsername(),
       playerClanTag: this.usernameInput?.getClanTag() ?? null,
       clanTagCheck: this.usernameInput?.getClanCheck(),
@@ -1283,16 +1622,13 @@ const bootstrap = () => {
   new Client().initialize();
   initNavigation();
 
-  // Hide elements immediately
-  hideCrazyGamesElements();
-
-  // Also hide elements after a short delay to catch late-rendered components
-  setTimeout(hideCrazyGamesElements, 100);
-  setTimeout(hideCrazyGamesElements, 500);
-
-  // Populate the CrazyGames account buttons once the nav/top-bar have rendered
-  // (onUserMe also refreshes them after auth and on mid-session sign-in).
-  setTimeout(() => void updateCrazyGamesNavButton(), 500);
+  // CrazyGames UI tweaks — irrelevant on the desktop shell (no third-party ads).
+  if (!isDesktopShell()) {
+    hideCrazyGamesElements();
+    setTimeout(hideCrazyGamesElements, 100);
+    setTimeout(hideCrazyGamesElements, 500);
+    setTimeout(() => void updateCrazyGamesNavButton(), 500);
+  }
 };
 
 if (document.readyState === "loading") {

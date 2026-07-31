@@ -121,7 +121,33 @@ export function joinLobby(
   themeProvider.reset(); // fresh colour allocators for this game
   startGame(lobbyConfig.gameID, lobbyConfig.gameStartInfo?.config ?? {});
 
-  const transport = new Transport(lobbyConfig, eventBus);
+  let connectionFailed = false;
+  const onConnectionFailed = (reason: string): void => {
+    if (connectionFailed) return;
+    connectionFailed = true;
+    console.error(`[Lobby] Connection failed: ${reason}`);
+    document.dispatchEvent(
+      new CustomEvent("leave-lobby", {
+        detail: {
+          lobby: lobbyConfig.gameID,
+          cause: "connection-failed",
+          reason,
+        },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+    window.dispatchEvent(
+      new CustomEvent("show-message", {
+        detail: {
+          message: `Unable to join the online game: ${reason}`,
+          color: "red",
+          duration: 6000,
+        },
+      }),
+    );
+  };
+  const transport = new Transport(lobbyConfig, eventBus, onConnectionFailed);
 
   let currentGameRunner: ClientGameRunner | null = null;
 

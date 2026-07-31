@@ -787,6 +787,15 @@
     "host_left": "The host has left the lobby.",
     "lobby_creator": "Kicked by lobby creator"
   },
+  "lan_lobby": {
+    "connect": "Connect",
+    "discovered": "Discovered Games",
+    "join": "Join",
+    "manual": "Manual Connection",
+    "no_games": "No games found on the LAN. Start a game or enter an address manually.",
+    "searching": "Searching for games on your local network...",
+    "title": "LAN Games"
+  },
   "lang": {
     "en": "English",
     "lang_code": "en",
@@ -831,6 +840,7 @@
   },
   "main": {
     "account": "Account",
+    "change_server": "Change Server",
     "clans": "Clans",
     "copyright": "© OpenFront™ and Contributors",
     "create": "Create Lobby",
@@ -841,9 +851,10 @@
     "help": "Help",
     "join": "Join Lobby",
     "lan_games": "LAN Games",
-    "map_generator": "Map Generator",
     "leaderboard": "Leaderboard",
     "login_discord": "Login with Discord",
+    "login_google": "Login with Google",
+    "map_generator": "Map Generator",
     "menu": "Menu",
     "news": "News",
     "play": "Play",
@@ -994,6 +1005,25 @@
     "login_required": "Login to play ranked!",
     "must_login": "You must be logged in to play ranked matchmaking.",
     "play_ranked": "1v1 Ranked Matchmaking"
+  },
+  "map_generator": {
+    "browse": "Browse...",
+    "generate": "Generate Map",
+    "generating": "Generating...",
+    "height": "Height (pixels)",
+    "map_name": "Map Name",
+    "mountain_threshold": "Mountain Threshold (0-255)",
+    "title": "Map Generator",
+    "water_level": "Water Level (0-255)",
+    "width": "Width (pixels)"
+  },
+  "marketing_consent": {
+    "body": "News and updates by email. Change it anytime in your account.",
+    "dismiss": "Dismiss",
+    "error": "Couldn't save that. Please try again.",
+    "no": "No thanks",
+    "title": "Keep up with OpenFront?",
+    "yes": "Yes please"
   },
   "matchmaking_modal": {
     "connecting": "Connecting to matchmaking server...",
@@ -1219,6 +1249,18 @@
     "capacity_note": "Receiver can accept only {amount} right now.",
     "slider_tooltip": "{percent}% • {amount}",
     "title_with_name": "Send Troops to {name}"
+  },
+  "server_selector": {
+    "cancel": "Cancel",
+    "connect": "Connect",
+    "connecting": "Connecting...",
+    "current": "current",
+    "custom": "Custom Server...",
+    "description": "Choose which server to connect to for multiplayer games.",
+    "production": "Production (openfront.io)",
+    "reconnect": "Reconnect",
+    "staging": "Staging (main.openfront.dev)",
+    "title": "Select Game Server"
   },
   "single_modal": {
     "bots": "Tribes: ",
@@ -1505,28 +1547,5 @@
     "you_won": "You Won!",
     "your_team": "Your team won!",
     "youtube_tutorial": "Need some help?"
-  },
-  "map_generator": {
-    "browse": "Browse...",
-    "close": "Close",
-    "generate": "Generate Map",
-    "generating": "Generating...",
-    "height": "Height (pixels)",
-    "input_image": "Input Image (PNG)",
-    "map_name": "Map Name",
-    "mountain_threshold": "Mountain Threshold (0-255)",
-    "title": "Map Generator",
-    "water_level": "Water Level (0-255)",
-    "width": "Width (pixels)"
-  },
-  "lan_lobby": {
-    "close": "Close",
-    "connect": "Connect",
-    "discovered": "Discovered Games",
-    "join": "Join",
-    "manual": "Manual Connection",
-    "no_games": "No games found on the LAN. Start a game or enter an address manually.",
-    "searching": "Searching for games on your local network...",
-    "title": "LAN Games"
   }
 }

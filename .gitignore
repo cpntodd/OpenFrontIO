@@ -29,3 +29,5 @@ map-generator/map-generator.exe
 
 # Electron compiled output
 electron-dist/
+desktop-config.json
+dist-electron/

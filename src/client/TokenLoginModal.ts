@@ -129,6 +129,11 @@ export class TokenLoginModal extends BaseModal {
         return;
       }
       clearInterval(this.retryInterval);
+      // The Electron OAuth broker remains open until the main renderer has
+      // successfully exchanged this one-time token and installed the refresh
+      // session. This acknowledgement closes the broker without racing the
+      // local cookie write.
+      await window.electronAPI?.["oauth-authenticated"]?.();
       setTimeout(() => {
         this.close();
         window.location.reload();
