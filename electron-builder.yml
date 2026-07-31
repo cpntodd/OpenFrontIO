@@ -1,0 +1,77 @@
+appId: io.openfront.desktop
+productName: OpenFront
+copyright: "Copyright © OpenFront and Contributors"
+
+# ── Directories ──────────────────────────────────
+directories:
+  output: dist-electron
+  buildResources: build
+
+# ── Files to include in the app package ───────────
+files:
+  - static/**/*
+  - electron/**/*.js
+  - electron/**/*.mjs
+  - package.json
+  - node_modules/**/*
+
+extraResources:
+  - from: build/map-generator
+    to: map-generator
+    filter:
+      - "**/*"
+
+# Exclude development files from the package
+asar: true
+
+# ── Linux / Debian ───────────────────────────────
+linux:
+  target:
+    - target: deb
+      arch:
+        - x64
+  category: Game
+  icon: build/icon.png
+  desktop:
+    Name: OpenFront
+    Comment: Real-time multiplayer territorial strategy game
+    Categories: Game;Strategy;
+    StartupWMClass: OpenFront
+  synopsis: Real-time multiplayer territorial strategy game
+  description: >
+    OpenFront is an online real-time strategy game focused on
+    territorial control and alliance building. Players compete
+    to expand their territory, build structures, and form
+    strategic alliances in various maps based on real-world geography.
+  maintainer: cpntodd
+  depends:
+    - libwebkit2gtk-4.1-0
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libxtst6
+    - xdg-utils
+
+# ── Mac (for future) ──────────────────────────────
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.games
+
+# ── Windows (for future) ─────────────────────────
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+# ── Publish (auto-update) ────────────────────────
+publish:
+  - provider: github
+    owner: cpntodd
+    repo: OpenFrontIO
+    releaseType: release

@@ -1,10 +1,10 @@
 [
   {
-    "id": "firefox-performance-issues-2026",
-    "title": "Firefox Performance Issues",
-    "descriptionTranslationKey": "news_box.firefox_warning",
+    "id": "openfront-desktop-welcome",
+    "title": "OpenFront Desktop",
+    "description": "Welcome to the OpenFront Desktop application! Connect to openfront.io servers for online play, or host a LAN game for local multiplayer.",
     "url": null,
-    "type": "warning"
+    "type": "announcement"
   },
   {
     "id": "clan-tournament-spring-2026",

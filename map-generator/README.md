@@ -57,6 +57,14 @@ Alternatively, `npm run gen-maps` (from the root directory) runs the generator f
 - `--maps`: Optional comma-separated list of maps to process.
   - ex: `go run . --maps=world,eastasia,big_plains`
 
+The desktop map generator also supports one-off custom maps:
+
+- `--map-name`: Name for the generated map.
+- `--input`: Source PNG path (mutually exclusive with `--seed`).
+- `--seed`: A deterministic seed containing 1–128 printable ASCII characters (mutually exclusive with `--input`).
+- `--output`: Output directory for the generated map files.
+- `--width` / `--height`: Seed map dimensions; both default to 512.
+
 ### Logging
 
 - `--log-level`: Explicitly sets the log level.

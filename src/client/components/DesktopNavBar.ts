@@ -146,6 +146,18 @@ export class DesktopNavBar extends LitElement {
               `
             : ""}
         </div>
+        <!-- Desktop-only: LAN Games -->
+        <button
+          class="nav-menu-item nav-desktop-only text-white/70 hover:text-malibu-blue font-medium tracking-wider uppercase cursor-pointer transition-colors [&.active]:text-malibu-blue "
+          data-page="page-lan"
+          data-i18n="main.lan_games"
+        ></button>
+        <!-- Desktop-only: Map Generator -->
+        <button
+          class="nav-menu-item nav-desktop-only text-white/70 hover:text-malibu-blue font-medium tracking-wider uppercase cursor-pointer transition-colors [&.active]:text-malibu-blue "
+          data-page="page-map-gen"
+          data-i18n="main.map_generator"
+        ></button>
         <button
           id="nav-account-button"
           class="nav-menu-item relative h-10 rounded-full overflow-hidden flex items-center justify-center gap-2 px-3 bg-transparent border border-white/20 text-white/80 hover:text-white cursor-pointer transition-colors [&.active]:text-white"

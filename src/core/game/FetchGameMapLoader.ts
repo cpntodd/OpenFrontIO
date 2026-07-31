@@ -1,4 +1,5 @@
 import { GameMapType } from "./Game";
+import { customMapAssetUrl, isCustomMap } from "./CustomMap";
 import { GameMapLoader, MapData } from "./GameMapLoader";
 
 export class FetchGameMapLoader implements GameMapLoader {
@@ -21,16 +22,21 @@ export class FetchGameMapLoader implements GameMapLoader {
     );
     const fileName = key?.toLowerCase();
 
-    if (!fileName) {
+    if (!fileName && !isCustomMap(map)) {
       throw new Error(`Unknown map: ${map}`);
     }
 
+    const mapUrl = (file: string) =>
+      isCustomMap(map)
+        ? customMapAssetUrl(map, file)
+        : this.url(fileName!, file);
+
     const mapData = {
-      mapBin: () => this.loadBinaryFromUrl(this.url(fileName, "map.bin")),
-      map4xBin: () => this.loadBinaryFromUrl(this.url(fileName, "map4x.bin")),
-      map16xBin: () => this.loadBinaryFromUrl(this.url(fileName, "map16x.bin")),
-      manifest: () => this.loadJsonFromUrl(this.url(fileName, "manifest.json")),
-      webpPath: this.url(fileName, "thumbnail.webp"),
+      mapBin: () => this.loadBinaryFromUrl(mapUrl("map.bin")),
+      map4xBin: () => this.loadBinaryFromUrl(mapUrl("map4x.bin")),
+      map16xBin: () => this.loadBinaryFromUrl(mapUrl("map16x.bin")),
+      manifest: () => this.loadJsonFromUrl(mapUrl("manifest.json")),
+      webpPath: mapUrl("thumbnail.webp"),
     } satisfies MapData;
 
     this.maps.set(map, mapData);

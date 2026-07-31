@@ -50,6 +50,16 @@ func discoverMaps() ([]mapEntry, error) {
 // mapsFlag holds the comma-separated list of map names passed via the --maps command-line argument.
 var mapsFlag string
 
+// Custom generation flags are used by the Electron desktop map-generator
+// page. When --map-name and --output are supplied, the CLI generates one map
+// from either --input or --seed instead of processing the bundled registry.
+var mapNameFlag string
+var inputFlag string
+var outputFlag string
+var seedFlag string
+var widthFlag int
+var heightFlag int
+
 // workersFlag controls how many maps are processed concurrently, bounding peak memory usage.
 var workersFlag int
 
@@ -142,32 +152,93 @@ func processMap(ctx context.Context, name string, isTest bool) error {
 	}
 
 	mapDir := filepath.Join(outputMapBaseDir, name)
+	return writeGeneratedMap(mapDir, result, manifest)
+}
+
+func writeGeneratedMap(mapDir string, result MapResult, manifest map[string]interface{}) error {
 	if err := os.MkdirAll(mapDir, 0755); err != nil {
-		return fmt.Errorf("failed to create output directory for %s: %w", name, err)
+		return fmt.Errorf("failed to create output directory %s: %w", mapDir, err)
 	}
-	if err := os.WriteFile(filepath.Join(mapDir, "map.bin"), result.Map.Data, 0644); err != nil {
-		return fmt.Errorf("failed to write combined binary for %s: %w", name, err)
+	files := map[string][]byte{
+		"map.bin":        result.Map.Data,
+		"map4x.bin":      result.Map4x.Data,
+		"map16x.bin":     result.Map16x.Data,
+		"thumbnail.webp": result.Thumbnail,
 	}
-	if err := os.WriteFile(filepath.Join(mapDir, "map4x.bin"), result.Map4x.Data, 0644); err != nil {
-		return fmt.Errorf("failed to write combined binary for %s: %w", name, err)
-	}
-	if err := os.WriteFile(filepath.Join(mapDir, "map16x.bin"), result.Map16x.Data, 0644); err != nil {
-		return fmt.Errorf("failed to write combined binary for %s: %w", name, err)
-	}
-	if err := os.WriteFile(filepath.Join(mapDir, "thumbnail.webp"), result.Thumbnail, 0644); err != nil {
-		return fmt.Errorf("failed to write thumbnail for %s: %w", name, err)
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(mapDir, name), data, 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", name, err)
+		}
 	}
 
-	// Serialize the updated manifest to JSON
 	updatedManifest, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to serialize manifest for %s: %w", name, err)
+		return fmt.Errorf("failed to serialize manifest: %w", err)
 	}
-
 	if err := os.WriteFile(filepath.Join(mapDir, "manifest.json"), updatedManifest, 0644); err != nil {
-		return fmt.Errorf("failed to write manifest for %s: %w", name, err)
+		return fmt.Errorf("failed to write manifest: %w", err)
 	}
 	return nil
+}
+
+func runCustomGeneration(ctx context.Context) error {
+	if mapNameFlag == "" {
+		return fmt.Errorf("--map-name is required for custom generation")
+	}
+	if outputFlag == "" {
+		return fmt.Errorf("--output is required for custom generation")
+	}
+	if inputFlag == "" && seedFlag == "" {
+		return fmt.Errorf("either --input or --seed is required for custom generation")
+	}
+	if inputFlag != "" && seedFlag != "" {
+		return fmt.Errorf("--input and --seed cannot be used together")
+	}
+
+	var imageBuffer []byte
+	if inputFlag != "" {
+		var err error
+		imageBuffer, err = os.ReadFile(inputFlag)
+		if err != nil {
+			return fmt.Errorf("failed to read input image %s: %w", inputFlag, err)
+		}
+	}
+
+	result, err := GenerateMap(ctx, GeneratorArgs{
+		Name:        mapNameFlag,
+		ImageBuffer: imageBuffer,
+		Seed:        seedFlag,
+		Width:       widthFlag,
+		Height:      heightFlag,
+		RemoveSmall: true,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate custom map: %w", err)
+	}
+
+	manifest := map[string]interface{}{
+		"name": mapNameFlag,
+		// Custom maps do not have fixed country spawn metadata. Keeping an
+		// explicit empty list makes the manifest compatible with the normal
+		// solo map loader; users can still choose a numeric nation count.
+		"nations": []interface{}{},
+		"map": map[string]interface{}{
+			"width":          result.Map.Width,
+			"height":         result.Map.Height,
+			"num_land_tiles": result.Map.NumLandTiles,
+		},
+		"map4x": map[string]interface{}{
+			"width":          result.Map4x.Width,
+			"height":         result.Map4x.Height,
+			"num_land_tiles": result.Map4x.NumLandTiles,
+		},
+		"map16x": map[string]interface{}{
+			"width":          result.Map16x.Width,
+			"height":         result.Map16x.Height,
+			"num_land_tiles": result.Map16x.NumLandTiles,
+		},
+	}
+	return writeGeneratedMap(outputFlag, result, manifest)
 }
 
 // parseMapsFlag validates and parses the --maps command-line argument.
@@ -246,6 +317,12 @@ func loadTerrainMaps() error {
 // It parses flags and triggers the map generation process.
 func main() {
 	flag.StringVar(&mapsFlag, "maps", "", "optional comma-separated list of maps to process. ex: --maps=world,eastasia,big_plains")
+	flag.StringVar(&mapNameFlag, "map-name", "", "custom map name")
+	flag.StringVar(&inputFlag, "input", "", "custom map source PNG")
+	flag.StringVar(&outputFlag, "output", "", "custom map output directory")
+	flag.StringVar(&seedFlag, "seed", "", "custom map printable seed")
+	flag.IntVar(&widthFlag, "width", 0, "custom seed map width (default 512)")
+	flag.IntVar(&heightFlag, "height", 0, "custom seed map height (default 512)")
 	flag.IntVar(&workersFlag, "workers", 4, "number of maps to process concurrently. reduce to lower peak memory usage.")
 	flag.StringVar(&logFlags.logLevel, "log-level", "", "Explicitly sets the log level to one of: ALL, DEBUG, INFO (default), WARN, ERROR.")
 	flag.BoolVar(&logFlags.verbose, "verbose", false, "Adds additional logging and prefixes logs with the [mapname].  Alias of log-level=DEBUG.")
@@ -263,6 +340,14 @@ func main() {
 	))
 
 	slog.SetDefault(logger)
+
+	if mapNameFlag != "" || inputFlag != "" || outputFlag != "" || seedFlag != "" {
+		if err := runCustomGeneration(context.Background()); err != nil {
+			log.Fatalf("Error generating custom map: %v", err)
+		}
+		fmt.Println("Custom map generated successfully")
+		return
+	}
 
 	discovered, err := discoverMaps()
 	if err != nil {

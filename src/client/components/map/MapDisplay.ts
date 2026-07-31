@@ -68,7 +68,9 @@ export class MapDisplay extends LitElement {
 
     try {
       this.isLoading = true;
-      const mapValue = GameMapType[this.mapKey as keyof typeof GameMapType];
+      const mapValue =
+        GameMapType[this.mapKey as keyof typeof GameMapType] ??
+        (this.mapKey as GameMapType);
       const data = terrainMapFileLoader.getMapData(mapValue);
       this.mapWebpPath = data.webpPath;
       const manifest = await data.manifest();

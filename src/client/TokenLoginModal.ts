@@ -83,6 +83,10 @@ export class TokenLoginModal extends BaseModal {
     this.attemptCount = 0;
     this.isAttemptingLogin = false;
     this.open();
+    // The modal used to wait for the first three-second retry tick. Start the
+    // exchange immediately now that Electron can close the OAuth broker window
+    // as soon as it hands this token back to the main renderer.
+    void this.tryLogin();
   }
 
   public open(args?: Record<string, unknown>): void {

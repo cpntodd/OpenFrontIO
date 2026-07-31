@@ -840,6 +840,8 @@
     "go_to_troubleshooting": "Go to our troubleshooting page",
     "help": "Help",
     "join": "Join Lobby",
+    "lan_games": "LAN Games",
+    "map_generator": "Map Generator",
     "leaderboard": "Leaderboard",
     "login_discord": "Login with Discord",
     "menu": "Menu",
@@ -1503,5 +1505,28 @@
     "you_won": "You Won!",
     "your_team": "Your team won!",
     "youtube_tutorial": "Need some help?"
+  },
+  "map_generator": {
+    "browse": "Browse...",
+    "close": "Close",
+    "generate": "Generate Map",
+    "generating": "Generating...",
+    "height": "Height (pixels)",
+    "input_image": "Input Image (PNG)",
+    "map_name": "Map Name",
+    "mountain_threshold": "Mountain Threshold (0-255)",
+    "title": "Map Generator",
+    "water_level": "Water Level (0-255)",
+    "width": "Width (pixels)"
+  },
+  "lan_lobby": {
+    "close": "Close",
+    "connect": "Connect",
+    "discovered": "Discovered Games",
+    "join": "Join",
+    "manual": "Manual Connection",
+    "no_games": "No games found on the LAN. Start a game or enter an address manually.",
+    "searching": "Searching for games on your local network...",
+    "title": "LAN Games"
   }
 }

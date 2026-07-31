@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"hash/fnv"
 	"image"
 	"image/color"
 	"image/png"
@@ -76,6 +77,9 @@ type MapInfo struct {
 type GeneratorArgs struct {
 	Name        string
 	ImageBuffer []byte
+	Seed        string
+	Width       int
+	Height      int
 	RemoveSmall bool
 }
 
@@ -104,9 +108,20 @@ type GeneratorArgs struct {
 //   - It normalizes map width/height to multiples of 4 for the mini map downscaling.
 func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 	logger := LoggerFromContext(ctx)
-	img, err := png.Decode(bytes.NewReader(args.ImageBuffer))
-	if err != nil {
-		return MapResult{}, fmt.Errorf("failed to decode PNG: %w", err)
+	var img image.Image
+	var err error
+	if len(args.ImageBuffer) > 0 {
+		img, err = png.Decode(bytes.NewReader(args.ImageBuffer))
+		if err != nil {
+			return MapResult{}, fmt.Errorf("failed to decode PNG: %w", err)
+		}
+	} else if args.Seed != "" {
+		img, err = generateSeedImage(args.Seed, args.Width, args.Height)
+		if err != nil {
+			return MapResult{}, err
+		}
+	} else {
+		return MapResult{}, fmt.Errorf("either an input image or a seed is required")
 	}
 
 	bounds := img.Bounds()
@@ -213,6 +228,103 @@ func GenerateMap(ctx context.Context, args GeneratorArgs) (MapResult, error) {
 		},
 		Thumbnail: webp,
 	}, nil
+}
+
+// generateSeedImage creates a deterministic height map from a printable seed.
+// It uses several layers of interpolated value noise so nearby pixels form
+// coastlines and terrain rather than independent random dots. The resulting
+// image is fed through the same GenerateMap pipeline as a user-supplied PNG.
+func generateSeedImage(seed string, requestedWidth, requestedHeight int) (image.Image, error) {
+	if len(seed) == 0 || len(seed) > 128 {
+		return nil, fmt.Errorf("seeds must contain between 1 and 128 printable ASCII characters")
+	}
+	for index := 0; index < len(seed); index++ {
+		if seed[index] < 0x20 || seed[index] > 0x7e {
+			return nil, fmt.Errorf("seeds may use printable ASCII characters only")
+		}
+	}
+
+	width := requestedWidth
+	height := requestedHeight
+	if width == 0 {
+		width = 512
+	}
+	if height == 0 {
+		height = 512
+	}
+	if width < 32 || height < 32 {
+		return nil, fmt.Errorf("seed maps must be at least 32x32 pixels")
+	}
+	if width > 4096 || height > 4096 {
+		return nil, fmt.Errorf("seed maps cannot exceed 4096x4096 pixels")
+	}
+
+	hasher := fnv.New64a()
+	_, _ = hasher.Write([]byte(seed))
+	seedValue := hasher.Sum64()
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			large := interpolatedNoise(seedValue+0x9e3779b97f4a7c15, x, y, 160)
+			medium := interpolatedNoise(seedValue+0xbf58476d1ce4e5b9, x, y, 72)
+			fine := interpolatedNoise(seedValue+0x94d049bb133111eb, x, y, 24)
+			noise := large*0.55 + medium*0.30 + fine*0.15
+
+			// A gentle continental falloff keeps the edges more likely to be
+			// ocean while preserving seed-specific coastlines and islands.
+			nx := (float64(x)/float64(width-1))*2 - 1
+			ny := (float64(y)/float64(height-1))*2 - 1
+			distance := math.Sqrt(nx*nx + ny*ny)
+			noise += (0.62 - distance) * 0.12
+			noise = math.Max(0, math.Min(1, noise))
+
+			if noise < 0.42 {
+				// Blue 106 is the canonical water key colour understood by
+				// GenerateMap. Keep alpha opaque so the seed path remains
+				// equivalent to an ordinary PNG source image.
+				img.SetRGBA(x, y, color.RGBA{B: 106, A: 255})
+				continue
+			}
+
+			blue := uint8(140 + math.Round((noise-0.42)/0.58*90))
+			if blue > 230 {
+				blue = 230
+			}
+			img.SetRGBA(x, y, color.RGBA{R: blue, G: blue, B: blue, A: 255})
+		}
+	}
+
+	return img, nil
+}
+
+func interpolatedNoise(seed uint64, x, y, cellSize int) float64 {
+	gridX := x / cellSize
+	gridY := y / cellSize
+	tx := smoothStep(float64(x%cellSize) / float64(cellSize))
+	ty := smoothStep(float64(y%cellSize) / float64(cellSize))
+
+	top := lerp(seedNoise(seed, gridX, gridY), seedNoise(seed, gridX+1, gridY), tx)
+	bottom := lerp(seedNoise(seed, gridX, gridY+1), seedNoise(seed, gridX+1, gridY+1), tx)
+	return lerp(top, bottom, ty)
+}
+
+func seedNoise(seed uint64, x, y int) float64 {
+	value := seed + uint64(int64(x))*0x9e3779b97f4a7c15 + uint64(int64(y))*0xbf58476d1ce4e5b9
+	value ^= value >> 30
+	value *= 0xbf58476d1ce4e5b9
+	value ^= value >> 27
+	value *= 0x94d049bb133111eb
+	value ^= value >> 31
+	return float64(value>>11) / float64(uint64(1)<<53)
+}
+
+func smoothStep(value float64) float64 {
+	return value * value * (3 - 2*value)
+}
+
+func lerp(a, b, amount float64) float64 {
+	return a + (b-a)*amount
 }
 
 // convertToWebP encodes raw RGBA thumbnail data into WebP format.

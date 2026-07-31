@@ -43,6 +43,8 @@ import "./LangSelector";
 import { LangSelector } from "./LangSelector";
 import { initLayout } from "./Layout";
 import "./LeaderboardModal";
+import "./MapGeneratorModal";
+import "./LanLobbyModal";
 import "./Matchmaking";
 import { MatchmakingModal } from "./Matchmaking";
 import { modalRouter } from "./ModalRouter";
@@ -242,9 +244,174 @@ export interface JoinLobbyEvent {
   publicLobbyInfo?: GameInfo | PublicGameInfo;
 }
 
+// ── Turnstile token manager ──────────────────────────────
+// Manages Turnstile token lifecycle to prevent duplicate widget creation and
+// Cloudflare 429 rate limits. Tokens are prefetched, then consumed exactly
+// once by the next online join because Turnstile tokens are single-use. Only
+// one widget is ever active.
+
+const TOKEN_TTL_MS = 3 * 60 * 1000;
+
+class TurnstileTokenManager {
+  private currentToken: { token: string; createdAt: number } | null = null;
+  private pendingPromise: Promise<{ token: string; createdAt: number }> | null = null;
+
+  prefetch(): void {
+    void this.ensureToken();
+  }
+
+  async takeToken(): Promise<string | null> {
+    try {
+      const result = await this.ensureToken();
+      if (result === null) return null;
+
+      // A Turnstile token may only be submitted once. Clear it before
+      // returning so a second join cannot accidentally replay it.
+      if (this.currentToken?.token === result.token) {
+        this.currentToken = null;
+      }
+      return result.token;
+    } catch (err) {
+      console.error("[Turnstile] Token generation failed:", err);
+      return null;
+    }
+  }
+
+  private async ensureToken(): Promise<{
+    token: string;
+    createdAt: number;
+  } | null> {
+    if (this.currentToken) {
+      if (Date.now() < this.currentToken.createdAt + TOKEN_TTL_MS) {
+        return this.currentToken;
+      }
+      this.currentToken = null;
+    }
+
+    if (this.pendingPromise) {
+      return this.pendingPromise;
+    }
+
+    const pending = this.generateToken();
+    this.pendingPromise = pending;
+    try {
+      const result = await pending;
+      this.currentToken = result;
+      return result;
+    } catch (err) {
+      console.error("[Turnstile] Token generation failed:", err);
+      return null;
+    } finally {
+      if (this.pendingPromise === pending) {
+        this.pendingPromise = null;
+      }
+    }
+  }
+
+  private async generateToken(): Promise<{ token: string; createdAt: number }> {
+    let attempts = 0;
+    while (typeof window.turnstile === "undefined" && attempts < 100) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      attempts++;
+    }
+    if (typeof window.turnstile === "undefined") {
+      throw new Error("Failed to load Turnstile script");
+    }
+    const container = document.getElementById("turnstile-container");
+    if (container) {
+      while (container.firstChild) container.removeChild(container.firstChild);
+    }
+    const widgetId = window.turnstile.render("#turnstile-container", {
+      sitekey: ClientEnv.turnstileSiteKey(),
+      size: "normal",
+      appearance: "interaction-only",
+      theme: "light",
+      // render() must not start execution implicitly; execute() below is the
+      // single owner of this widget's execution lifecycle.
+      execution: "execute",
+    });
+    return new Promise((resolve, reject) => {
+      window.turnstile.execute(widgetId, {
+        callback: (token: string) => {
+          window.turnstile.remove(widgetId);
+          console.log("[Turnstile] Token received");
+          resolve({ token, createdAt: Date.now() });
+        },
+        "error-callback": (errorCode: string) => {
+          window.turnstile.remove(widgetId);
+          console.error(`[Turnstile] Error: ${errorCode}`);
+          reject(new Error(`Turnstile failed: ${errorCode}`));
+        },
+      });
+    });
+  }
+}
+
+const turnstileManager = new TurnstileTokenManager();
+
+// Legacy wrapper used by ClientGameRunner for initial prefetch
+async function getTurnstileToken(): Promise<{ token: string; createdAt: number } | null> {
+  const token = await turnstileManager.takeToken();
+  if (!token) return null;
+  return { token, createdAt: Date.now() };
+}
+
 class Client {
   private lobbyHandle: JoinLobbyResult | null = null;
   private eventBus: EventBus = new EventBus();
+  private assetSyncBar: HTMLElement | null = null;
+
+  // ── Desktop: asset sync progress ──
+  private updateAssetSyncProgress(progress: {
+    phase: string;
+    current: number;
+    total: number;
+    fileName?: string;
+  }): void {
+    if (!this.assetSyncBar) {
+      this.assetSyncBar = document.createElement("div");
+      this.assetSyncBar.id = "asset-sync-progress";
+      this.assetSyncBar.innerHTML = `
+        <div style="position:fixed;bottom:0;left:0;right:0;z-index:99999;background:#1e1e1e;border-top:2px solid #f09040;padding:8px 16px;font-family:monospace;font-size:12px;color:#d4d4d4;">
+          <div style="display:flex;justify-content:space-between;margin-bottom:4px;">
+            <span id="asset-sync-label">Syncing assets...</span>
+            <span id="asset-sync-count">0 / 0</span>
+          </div>
+          <div style="width:100%;height:4px;background:#3e3e42;border-radius:2px;overflow:hidden;">
+            <div id="asset-sync-fill" style="height:100%;background:#f09040;width:0%;transition:width 0.3s ease;"></div>
+          </div>
+          <div id="asset-sync-file" style="margin-top:4px;color:#9d9d9d;font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+        </div>`;
+      document.body.appendChild(this.assetSyncBar);
+    }
+
+    const fill = this.assetSyncBar.querySelector("#asset-sync-fill") as HTMLElement;
+    const count = this.assetSyncBar.querySelector("#asset-sync-count") as HTMLElement;
+    const file = this.assetSyncBar.querySelector("#asset-sync-file") as HTMLElement;
+
+    if (progress.total > 0) {
+      const pct = Math.round((progress.current / progress.total) * 100);
+      if (fill) fill.style.width = `${pct}%`;
+      if (count) count.textContent = `${progress.current} / ${progress.total}`;
+    }
+    if (file && progress.fileName) {
+      file.textContent = progress.fileName;
+    }
+
+    // Remove bar when done
+    if (progress.current >= progress.total && progress.total > 0) {
+      setTimeout(() => {
+        if (this.assetSyncBar) {
+          this.assetSyncBar.style.transition = "opacity 0.5s ease";
+          this.assetSyncBar.style.opacity = "0";
+          setTimeout(() => {
+            this.assetSyncBar?.remove();
+            this.assetSyncBar = null;
+          }, 500);
+        }
+      }, 1500);
+    }
+  }
 
   private currentUrl: string | null = null;
 
@@ -259,11 +426,6 @@ class Client {
   private tokenLoginModal: TokenLoginModal;
   private matchmakingModal: MatchmakingModal;
   private mostRecentJoinEvent: number;
-
-  private turnstileTokenPromise: Promise<{
-    token: string;
-    createdAt: number;
-  }> | null = null;
 
   async initialize(): Promise<void> {
     crazyGamesSDK.maybeInit();
@@ -309,11 +471,37 @@ class Client {
     modalRouter.register("territory-patterns", {
       tag: "territory-patterns-modal",
     });
+
+    // ── Desktop: asset sync progress bar ──
+    if (window.electronAPI) {
+      window.electronAPI.on("asset-sync:progress", ((progress: unknown) => {
+        const p = progress as { phase: string; current: number; total: number; fileName?: string };
+        this.updateAssetSyncProgress(p);
+      }) as (...args: unknown[]) => void);
+
+      // Listen for OAuth callback token from the Electron OAuth window
+      window.electronAPI.on("oauth:token", ((token: unknown) => {
+        if (typeof token !== "string" || token.length === 0) return;
+        if (token === "REFRESH") {
+          // Auth cookies were copied to the local session by the main process.
+          // Reload so the refresh flow exchanges them for a JWT.
+          console.log("[Main] Auth cookies copied, refreshing session...");
+          window.location.reload();
+          return;
+        }
+        console.log("[Main] OAuth token received, completing login...");
+        const modal = document.querySelector("token-login") as TokenLoginModal;
+        if (modal && typeof modal.openWithToken === "function") {
+          modal.openWithToken(token);
+        }
+      }) as (...args: unknown[]) => void);
+    }
+    modalRouter.register("cosmetics", { tag: "cosmetics-modal" });
     modalRouter.register("flag-input", { tag: "flag-input-modal" });
 
-    // Prefetch turnstile token so it is available when
-    // the user joins a lobby.
-    this.turnstileTokenPromise = getTurnstileToken();
+    // Prefetch turnstile token so it is available when the user joins a lobby.
+    // Prefetch without consuming; the next online join takes this token once.
+    turnstileManager.prefetch();
 
     // Wait for components to render before setting version
     await customElements.whenDefined("mobile-nav-bar");
@@ -661,6 +849,19 @@ class Client {
         updateSliderProgress(slider);
         slider.addEventListener("input", () => updateSliderProgress(slider));
       });
+
+    // Listen for LAN join event to connect to the discovered server
+    window.addEventListener("lan-join", (e: Event) => {
+      const detail = (e as CustomEvent).detail as {
+        host: string;
+        port: number;
+      };
+      console.log(
+        `[Main] LAN join: connecting to ${detail.host}:${detail.port}`,
+      );
+      // TODO: implement WebSocket connection to LAN server
+      // This will be wired to the LobbySocket/Transport layer
+    });
   }
 
   private async handleUrl() {
@@ -1052,30 +1253,7 @@ class Client {
     ) {
       return null;
     }
-
-    // Always request a new token on crazygames.
-    if (this.turnstileTokenPromise === null || crazyGamesSDK.isOnCrazyGames()) {
-      console.log("No prefetched turnstile token, getting new token");
-      return (await getTurnstileToken())?.token ?? null;
-    }
-
-    const token = await this.turnstileTokenPromise;
-    // Clear promise so a new token is fetched next time
-    this.turnstileTokenPromise = null;
-    if (!token) {
-      console.log("No turnstile token");
-      return null;
-    }
-
-    const tokenTTL = 3 * 60 * 1000;
-    if (Date.now() < token.createdAt + tokenTTL) {
-      console.log("Prefetched turnstile token is valid");
-
-      return token.token;
-    } else {
-      console.log("Turnstile token expired, getting new token");
-      return (await getTurnstileToken())?.token ?? null;
-    }
+    return turnstileManager.takeToken();
   }
 }
 
@@ -1114,43 +1292,4 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", bootstrap);
 } else {
   bootstrap();
-}
-
-async function getTurnstileToken(): Promise<{
-  token: string;
-  createdAt: number;
-}> {
-  // Wait for Turnstile script to load (handles slow connections)
-  let attempts = 0;
-  while (typeof window.turnstile === "undefined" && attempts < 100) {
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    attempts++;
-  }
-
-  if (typeof window.turnstile === "undefined") {
-    throw new Error("Failed to load Turnstile script");
-  }
-
-  const widgetId = window.turnstile.render("#turnstile-container", {
-    sitekey: ClientEnv.turnstileSiteKey(),
-    size: "normal",
-    appearance: "interaction-only",
-    theme: "light",
-  });
-
-  return new Promise((resolve, reject) => {
-    window.turnstile.execute(widgetId, {
-      callback: (token: string) => {
-        window.turnstile.remove(widgetId);
-        console.log(`Turnstile token received: ${token}`);
-        resolve({ token, createdAt: Date.now() });
-      },
-      "error-callback": (errorCode: string) => {
-        window.turnstile.remove(widgetId);
-        console.error(`Turnstile error: ${errorCode}`);
-        alert(`Turnstile error: ${errorCode}. Please refresh and try again.`);
-        reject(new Error(`Turnstile failed: ${errorCode}`));
-      },
-    });
-  });
 }

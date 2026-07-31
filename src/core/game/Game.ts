@@ -104,6 +104,16 @@ export {
   type MapCategory,
   type MapInfo,
 } from "./Maps.gen";
+export {
+  CUSTOM_MAP_PREFIX,
+  customMapAssetBaseUrl,
+  customMapAssetUrl,
+  customMapFolder,
+  customMapValue,
+  isCustomMap,
+  type CustomMapEntry,
+  type CustomMapList,
+} from "./CustomMap";
 
 export enum GameType {
   Singleplayer = "Singleplayer",

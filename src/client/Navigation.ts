@@ -114,6 +114,13 @@ export function initNavigation() {
               ".page-content:not(.hidden)",
             ) as any;
 
+            // LAN Games and Map Generator are embedded pages, not modal
+            // overlays. Their content owns the whole page area, so clicking
+            // within that area must not be interpreted as a modal dismissal.
+            if (openModal?.id === "page-lan" || openModal?.id === "page-map-gen") {
+              return;
+            }
+
             if (openModal && typeof openModal.close === "function") {
               // Check confirmation guard before closing
               if (
